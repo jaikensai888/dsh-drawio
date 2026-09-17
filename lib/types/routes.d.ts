@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { type DrawioConfig } from './config.js';
 import type { WebappInstaller } from './webapp-install.js';
+import type { WorkspaceScopeInfo } from './workspace.js';
 /**
  * The one and only `webServer.register` call this plugin ever makes.
  *
@@ -11,13 +13,17 @@ import type { WebappInstaller } from './webapp-install.js';
 export declare const DRAWIO_ROUTE_PREFIX = "/drawio";
 export interface DrawioRouteDeps {
     installer: WebappInstaller;
+    /** Validated deployment configuration. */
+    config: DrawioConfig;
     /** Live non-loopback authorities this deployment serves (from `webRuntime`). */
     trustedHosts: () => readonly string[];
     /**
-     * Authoritative workspace cwd for a session. `header.cwd` wins; the client's
-     * cwd is only a hydration fallback, and `process.cwd()` the last resort.
+     * Workspace identity for a session. `header.cwd` wins; the client's cwd is
+     * only a hydration fallback, and `process.cwd()` the last resort. Re-resolved
+     * on every request because sessions are live and cwd is not cached across
+     * requests.
      */
-    resolveSessionCwd: (sessionId: string, clientCwd?: string) => string;
+    resolveWorkspace: (sessionId: string, clientCwd?: string) => Promise<WorkspaceScopeInfo>;
 }
 /** Build the dispatch table for the single `/drawio` prefix route. */
 export declare function createDrawioRouteHandler(deps: DrawioRouteDeps): (request: IncomingMessage, response: ServerResponse) => void;

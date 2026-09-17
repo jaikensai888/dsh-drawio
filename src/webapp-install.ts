@@ -62,6 +62,27 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** Which archive to install, and what it must hash to. */
+export interface WebappSource {
+  version: string
+  sha256: string
+  url: string
+  /** Expected archive size, used as the progress denominator before headers arrive. */
+  expectedBytes: number
+}
+
+/** Build the archive descriptor for a pinned release tag. */
+export function webappSourceFor(version: string, sha256: string, expectedBytes = DRAWIO_WAR_BYTES): WebappSource {
+  return {
+    version,
+    sha256,
+    url: `https://github.com/jgraph/drawio/releases/download/${version}/draw.war`,
+    expectedBytes,
+  }
+}
+
+export const DEFAULT_WEBAPP_SOURCE: WebappSource = webappSourceFor(DRAWIO_RELEASE_TAG, DRAWIO_WAR_SHA256)
+
 /**
  * Downloads and unpacks the drawio webapp into `<dshHome>/storages/dsh-drawio/webapp`.
  *
@@ -73,19 +94,22 @@ function errorMessage(error: unknown): string {
 export class WebappInstaller {
   readonly root: string
   readonly webappRoot: string
+  readonly #source: WebappSource
   readonly #markerPath: string
   #phase: WebappPhase = 'missing'
   #received = 0
-  #total = DRAWIO_WAR_BYTES
+  #total: number
   #message: string | undefined
   #installedAt: string | undefined
   #running: Promise<void> | undefined
   #probed = false
 
-  constructor(options: { root?: string } = {}) {
+  constructor(options: { root?: string, source?: WebappSource } = {}) {
     this.root = options.root ?? join(resolveDshHome(), 'storages', 'dsh-drawio')
     this.webappRoot = join(this.root, 'webapp')
     this.#markerPath = join(this.root, '.installed.json')
+    this.#source = options.source ?? DEFAULT_WEBAPP_SOURCE
+    this.#total = this.#source.expectedBytes
   }
 
   /** Current progress; probes the marker file once per process. */
@@ -119,7 +143,7 @@ export class WebappInstaller {
     const base = {
       phase: this.#phase,
       ready: this.#phase === 'ready',
-      version: DRAWIO_RELEASE_TAG,
+      version: this.#source.version,
       received: this.#received,
       total: this.#total,
       webappRoot: this.webappRoot,
@@ -136,7 +160,7 @@ export class WebappInstaller {
     this.#probed = true
     try {
       const marker = JSON.parse(await readFile(this.#markerPath, 'utf8')) as Partial<MarkerFile>
-      if (marker.version !== DRAWIO_RELEASE_TAG || marker.sha256 !== DRAWIO_WAR_SHA256) {
+      if (marker.version !== this.#source.version || marker.sha256 !== this.#source.sha256) {
         this.#phase = 'missing'
         return
       }
@@ -147,7 +171,7 @@ export class WebappInstaller {
       }
       this.#phase = 'ready'
       this.#installedAt = marker.installedAt
-      this.#total = typeof marker.warBytes === 'number' && marker.warBytes > 0 ? marker.warBytes : DRAWIO_WAR_BYTES
+      this.#total = typeof marker.warBytes === 'number' && marker.warBytes > 0 ? marker.warBytes : this.#source.expectedBytes
       this.#received = this.#total
     } catch {
       this.#phase = 'missing'
@@ -164,13 +188,13 @@ export class WebappInstaller {
     try {
       this.#phase = 'downloading'
       this.#received = 0
-      this.#total = DRAWIO_WAR_BYTES
+      this.#total = this.#source.expectedBytes
       const digest = await this.#download(warPath)
       const warBytes = (await stat(warPath)).size
 
       this.#phase = 'verifying'
-      if (digest !== DRAWIO_WAR_SHA256) {
-        throw new Error(`资源包校验失败：期望 sha256 ${DRAWIO_WAR_SHA256}，实际 ${digest}`)
+      if (digest !== this.#source.sha256) {
+        throw new Error(`资源包校验失败：期望 sha256 ${this.#source.sha256}，实际 ${digest}`)
       }
 
       this.#phase = 'extracting'
@@ -181,9 +205,9 @@ export class WebappInstaller {
 
       const installedAt = new Date().toISOString()
       const marker: MarkerFile = {
-        version: DRAWIO_RELEASE_TAG,
-        source: DRAWIO_WAR_URL,
-        sha256: DRAWIO_WAR_SHA256,
+        version: this.#source.version,
+        source: this.#source.url,
+        sha256: this.#source.sha256,
         warBytes,
         webappBytes: extracted.bytes,
         files: extracted.files,
@@ -195,7 +219,7 @@ export class WebappInstaller {
       this.#installedAt = installedAt
       this.#received = this.#total
       this.#phase = 'ready'
-      console.log(`[dsh-drawio] webapp ${DRAWIO_RELEASE_TAG} ready at ${this.webappRoot} (${String(extracted.files)} files)`)
+      console.log(`[dsh-drawio] webapp ${this.#source.version} ready at ${this.webappRoot} (${String(extracted.files)} files)`)
     } catch (error) {
       this.#phase = 'error'
       this.#message = errorMessage(error)
@@ -209,7 +233,7 @@ export class WebappInstaller {
 
   /** Stream the pinned archive to disk, hashing and metering as it goes. */
   async #download(target: string): Promise<string> {
-    const response = await fetch(DRAWIO_WAR_URL, { redirect: 'follow' })
+    const response = await fetch(this.#source.url, { redirect: 'follow' })
     if (!response.ok) {
       throw new Error(`下载 draw.io 资源包失败：HTTP ${String(response.status)} ${response.statusText}`)
     }

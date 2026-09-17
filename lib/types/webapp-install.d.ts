@@ -27,6 +27,17 @@ export interface WebappStatus {
     message?: string;
     installedAt?: string;
 }
+/** Which archive to install, and what it must hash to. */
+export interface WebappSource {
+    version: string;
+    sha256: string;
+    url: string;
+    /** Expected archive size, used as the progress denominator before headers arrive. */
+    expectedBytes: number;
+}
+/** Build the archive descriptor for a pinned release tag. */
+export declare function webappSourceFor(version: string, sha256: string, expectedBytes?: number): WebappSource;
+export declare const DEFAULT_WEBAPP_SOURCE: WebappSource;
 /**
  * Downloads and unpacks the drawio webapp into `<dshHome>/storages/dsh-drawio/webapp`.
  *
@@ -41,6 +52,7 @@ export declare class WebappInstaller {
     readonly webappRoot: string;
     constructor(options?: {
         root?: string;
+        source?: WebappSource;
     });
     /** Current progress; probes the marker file once per process. */
     status(): Promise<WebappStatus>;

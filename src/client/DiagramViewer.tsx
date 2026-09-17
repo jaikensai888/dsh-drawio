@@ -3,25 +3,26 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { FileViewerProps, SessionScope } from 'dsh-better-sidebar/client/service'
 import {
   DrawioApiError,
+  clientConfig,
+  createDiagram,
   fetchWebappStatus,
   readDiagram,
   startWebappInstall,
   writeDiagram,
   type DiagramReadResult,
+  type DrawioClientConfig,
   type WebappStatus,
 } from './api.js'
-import { drawioConfig, DRAWIO_EMBED_URL, createDrawioEmbedChannel } from './embed-protocol.js'
+import { drawioConfig, drawioEmbedUrl, createDrawioEmbedChannel } from './embed-protocol.js'
 
 const POLL_INTERVAL_MS = 700
-/** Idle delay before an autosave reaches disk; at or above drawio's own 1500ms autosaveDelay. */
-const WRITE_DEBOUNCE_MS = 1500
-/** Where "另存为" drops a copy, relative to the workspace. */
-const DIAGRAMS_DIR = 'docs/diagrams'
+/** Below this the editor collapses its own side panels, which the user should know about. */
+const NARROW_PANE_PX = 760
 
 const FONT = '13px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif'
 const BUTTON_STYLE: React.CSSProperties = { font: 'inherit', padding: '2px 8px', cursor: 'pointer' }
 
-type InstallPhase = 'probing' | 'installing' | 'ready' | 'error'
+type Phase = 'config' | 'probing' | 'installing' | 'ready' | 'error'
 type SaveState = 'idle' | 'saving' | 'saved' | 'failed'
 
 /** What the descriptor's `load()` hands back through `customData`. */
@@ -75,6 +76,25 @@ function Panel({ children }: { children: React.ReactNode }): JSX.Element {
   )
 }
 
+/** Last-resort error surface with a retry, used by every failed phase. */
+function FailurePanel(props: {
+  title: string
+  message: string
+  hint?: string
+  onRetry: () => void
+}): JSX.Element {
+  return (
+    <Panel>
+      <strong>{props.title}</strong>
+      <div style={{ opacity: 0.8, wordBreak: 'break-word' }}>{props.message}</div>
+      {props.hint === undefined ? null : <div style={{ opacity: 0.6, fontSize: 12 }}>{props.hint}</div>}
+      <div>
+        <button type="button" onClick={props.onRetry} style={BUTTON_STYLE}>重试</button>
+      </div>
+    </Panel>
+  )
+}
+
 /**
  * `.drawio` previewer backed by the self-hosted draw.io webapp.
  *
@@ -99,13 +119,12 @@ export function DiagramViewer(props: FileViewerProps): JSX.Element {
   }
   if (payload.kind === 'missing') {
     return (
-      <Panel>
-        <strong>此文件不存在</strong>
-        <div style={{ opacity: 0.8, wordBreak: 'break-all' }}>{payload.path}</div>
-        <div style={{ opacity: 0.6, fontSize: 12 }}>
-          确认路径是否正确。在编辑器标签页里直接敲一个不存在的 `docs/diagrams/x.drawio` 时，下一步会在这里提供创建按钮。
-        </div>
-      </Panel>
+      <MissingDiagram
+        ctx={props.ctx}
+        scope={props.scope}
+        path={payload.path}
+        title={props.title}
+      />
     )
   }
 
@@ -120,6 +139,57 @@ export function DiagramViewer(props: FileViewerProps): JSX.Element {
   )
 }
 
+/**
+ * Cold start entry (B): the path the user opened does not exist.
+ *
+ * The sidebar reports this through our own `load()` rather than as an error, so
+ * here it becomes an offer to create the file — which is what makes "type a new
+ * path into the editor tab" a usable creation flow.
+ */
+function MissingDiagram(props: {
+  ctx: Context
+  scope: SessionScope
+  path: string
+  title: string
+}): JSX.Element {
+  const { ctx, scope, path, title } = props
+  const [created, setCreated] = useState<DiagramReadResult | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const create = useCallback(async (): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    try {
+      // Create exactly at the path the user opened, then render it here — no
+      // tab churn, and the file is on disk before the first autosave.
+      setCreated(await createDiagram(scope, { path }))
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }, [path, scope])
+
+  if (created !== null) {
+    return <EditorPane ctx={ctx} scope={scope} path={created.path} title={title} initial={created} />
+  }
+
+  return (
+    <Panel>
+      <strong>此文件不存在</strong>
+      <div style={{ opacity: 0.8, wordBreak: 'break-all' }}>{path}</div>
+      <div style={{ opacity: 0.7 }}>可以在这里把它创建为一张空白图纸，之后照常编辑并自动保存。</div>
+      <div>
+        <button type="button" onClick={() => void create()} disabled={busy} style={BUTTON_STYLE}>
+          {busy ? '创建中…' : '创建为空白图纸'}
+        </button>
+      </div>
+      {error === null ? null : <div style={{ color: '#e5534b' }}>⚠ {error}</div>}
+    </Panel>
+  )
+}
+
 function EditorPane(props: {
   ctx: Context
   scope: SessionScope
@@ -129,9 +199,13 @@ function EditorPane(props: {
 }): JSX.Element {
   const { ctx, scope, path, title, initial } = props
 
-  const [installPhase, setInstallPhase] = useState<InstallPhase>('probing')
+  const [config, setConfig] = useState<DrawioClientConfig | null>(null)
+  const [configError, setConfigError] = useState<string | null>(null)
+  const [configAttempt, setConfigAttempt] = useState(0)
+
+  const [phase, setPhase] = useState<Phase>('config')
   const [status, setStatus] = useState<WebappStatus | null>(null)
-  const [installError, setInstallError] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [installAttempt, setInstallAttempt] = useState(0)
 
   const [doc, setDoc] = useState<DiagramReadResult>(initial)
@@ -142,9 +216,12 @@ function EditorPane(props: {
   const [editorKey, setEditorKey] = useState(0)
   const [saveAsOpen, setSaveAsOpen] = useState(false)
   const [saveAsName, setSaveAsName] = useState('')
+  const [narrow, setNarrow] = useState(false)
 
   const frameRef = useRef<HTMLIFrameElement | null>(null)
+  const rootRef = useRef<HTMLDivElement | null>(null)
   const docRef = useRef<DiagramReadResult>(initial)
+  const configRef = useRef<DrawioClientConfig | null>(null)
   const baselineRef = useRef({ mtimeMs: initial.mtimeMs, size: initial.size })
   const pendingRef = useRef<string | null>(null)
   const timerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null)
@@ -156,6 +233,36 @@ function EditorPane(props: {
   useEffect(() => {
     docRef.current = doc
   }, [doc])
+
+  // --- deployment configuration ---------------------------------------------
+  useEffect(() => {
+    let cancelled = false
+    setConfigError(null)
+    clientConfig().then((value) => {
+      if (cancelled) return
+      configRef.current = value
+      setConfig(value)
+    }).catch((caught: unknown) => {
+      if (cancelled) return
+      setConfigError(caught instanceof Error ? caught.message : String(caught))
+      setPhase('error')
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [configAttempt])
+
+  // The sidebar pane is ~537px wide by default; below NARROW_PANE_PX drawio
+  // collapses its own shape and format panels, so say how to get the room back.
+  useEffect(() => {
+    const element = rootRef.current
+    if (element === null || typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(() => {
+      setNarrow(element.getBoundingClientRect().width < NARROW_PANE_PX)
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   const applyDocument = useCallback((next: DiagramReadResult): void => {
     docRef.current = next
@@ -203,16 +310,16 @@ function EditorPane(props: {
         dirtyRef.current = false
         setDirty(false)
       }
-    } catch (error) {
-      if (error instanceof DrawioApiError && error.isConflict) {
-        const current = error.details?.['currentMtimeMs']
-        setConflict({ message: error.message, currentMtimeMs: typeof current === 'number' ? current : null })
+    } catch (caught) {
+      if (caught instanceof DrawioApiError && caught.isConflict) {
+        const current = caught.details?.['currentMtimeMs']
+        setConflict({ message: caught.message, currentMtimeMs: typeof current === 'number' ? current : null })
         pausedRef.current = true
         // Leave 'saving' behind: the write did not land and will not retry until
         // the user resolves the conflict.
         setSaveState('failed')
       } else {
-        setSaveError(error instanceof Error ? error.message : String(error))
+        setSaveError(caught instanceof Error ? caught.message : String(caught))
         setSaveState('failed')
       }
       // Keep the payload: a retry after the conflict is resolved must still land.
@@ -232,7 +339,7 @@ function EditorPane(props: {
     timerRef.current = globalThis.setTimeout(() => {
       timerRef.current = null
       void flush()
-    }, WRITE_DEBOUNCE_MS)
+    }, configRef.current?.writeDebounceMs ?? 1500)
   }, [flush])
 
   // Flush anything still pending when the viewer unmounts (tab close, HMR).
@@ -270,6 +377,14 @@ function EditorPane(props: {
 
   // --- editor asset readiness ------------------------------------------------
   useEffect(() => {
+    // An `editorUrl` escape hatch means we are not serving the editor at all,
+    // so there is nothing to install or wait for.
+    if (config === null) return undefined
+    if (config.editorUrl !== '') {
+      setPhase('ready')
+      return undefined
+    }
+
     const controller = new AbortController()
     let cancelled = false
     let timer: ReturnType<typeof globalThis.setTimeout> | undefined
@@ -284,28 +399,28 @@ function EditorPane(props: {
         started = true
         setStatus(snapshot)
         if (snapshot.ready) {
-          setInstallError(null)
-          setInstallPhase('ready')
+          setError(null)
+          setPhase('ready')
           return
         }
         if (snapshot.phase === 'error') {
-          setInstallError(snapshot.message ?? '编辑器资源安装失败')
-          setInstallPhase('error')
+          setError(snapshot.message ?? '编辑器资源安装失败')
+          setPhase('error')
           return
         }
-        setInstallPhase('installing')
+        setPhase('installing')
         timer = globalThis.setTimeout(() => {
           void tick()
         }, POLL_INTERVAL_MS)
       } catch (caught) {
         if (cancelled || controller.signal.aborted) return
-        setInstallError(caught instanceof Error ? caught.message : String(caught))
-        setInstallPhase('error')
+        setError(caught instanceof Error ? caught.message : String(caught))
+        setPhase('error')
       }
     }
 
-    setInstallPhase('probing')
-    setInstallError(null)
+    setPhase('probing')
+    setError(null)
     void tick()
 
     return () => {
@@ -313,11 +428,11 @@ function EditorPane(props: {
       controller.abort()
       if (timer !== undefined) globalThis.clearTimeout(timer)
     }
-  }, [installAttempt])
+  }, [config, installAttempt])
 
   // --- embed protocol --------------------------------------------------------
   useEffect(() => {
-    if (installPhase !== 'ready') return undefined
+    if (phase !== 'ready') return undefined
 
     const channel = createDrawioEmbedChannel({
       getFrame: () => frameRef.current,
@@ -325,7 +440,12 @@ function EditorPane(props: {
         if (event === 'configure') {
           // drawio waits for this reply before it initialises, and the reply has
           // to reflect THIS file's storage style.
-          channel.post('configure', { config: drawioConfig({ compressed: docRef.current.compressed }) })
+          channel.post('configure', {
+            config: drawioConfig({
+              compressed: docRef.current.compressed,
+              autosaveDelayMs: configRef.current?.autosaveDelayMs ?? 1500,
+            }),
+          })
           return
         }
         if (event === 'init') {
@@ -352,14 +472,14 @@ function EditorPane(props: {
     })
 
     return () => channel.dispose()
-  }, [installPhase, title, scheduleSave, flush])
+  }, [phase, title, scheduleSave, flush])
 
-  // --- conflict + save-as actions -------------------------------------------
+  // --- conflict + save-as + new actions --------------------------------------
   const reloadFromDisk = useCallback(async (): Promise<void> => {
     try {
       applyDocument(await readDiagram(scope, path))
-    } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error))
+    } catch (caught) {
+      setSaveError(caught instanceof Error ? caught.message : String(caught))
       setSaveState('failed')
     }
   }, [applyDocument, scope, path])
@@ -367,41 +487,56 @@ function EditorPane(props: {
   const saveAs = useCallback(async (): Promise<void> => {
     const name = saveAsName.trim().replace(/\.drawio$/iu, '')
     if (name === '') return
+    const directory = configRef.current?.diagramsDir ?? 'docs/diagrams'
     try {
-      const result = await writeDiagram(scope, `${DIAGRAMS_DIR}/${name}.drawio`, docRef.current.xml)
+      await writeDiagram(scope, `${directory}/${name}.drawio`, docRef.current.xml)
       setSaveAsOpen(false)
       setSaveAsName('')
-      // Hand the new path to the sidebar, which re-runs our load() for it.
-      ctx.betterSidebar.openFile(scope, result.path, `${name}.drawio`)
-    } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error))
+      ctx.betterSidebar.openFile(scope, `${directory}/${name}.drawio`)
+    } catch (caught) {
+      setSaveError(caught instanceof Error ? caught.message : String(caught))
       setSaveState('failed')
     }
   }, [ctx, scope, saveAsName])
 
+  const newDiagram = useCallback(async (): Promise<void> => {
+    try {
+      const created = await createDiagram(scope)
+      ctx.betterSidebar.openFile(scope, created.relativePath)
+    } catch (caught) {
+      setSaveError(caught instanceof Error ? caught.message : String(caught))
+      setSaveState('failed')
+    }
+  }, [ctx, scope])
+
   // --- render ----------------------------------------------------------------
-  if (installPhase !== 'ready') {
-    if (installPhase === 'error') {
+  if (configError !== null) {
+    return (
+      <FailurePanel
+        title="无法读取插件配置"
+        message={configError}
+        hint="dsh-drawio 的主机接口没有应答。请确认插件已挂载，然后重试。"
+        onRetry={() => setConfigAttempt((value) => value + 1)}
+      />
+    )
+  }
+
+  if (phase !== 'ready') {
+    if (phase === 'error') {
       return (
-        <Panel>
-          <strong>编辑器资源不可用</strong>
-          <div style={{ opacity: 0.8, wordBreak: 'break-word' }}>{installError ?? '未知错误'}</div>
-          <div style={{ opacity: 0.6, fontSize: 12 }}>
-            首次使用需要从 GitHub 下载 draw.io 资源包（约 51 MB）并解压到本机 DSH 存储目录。请检查网络后重试。
-          </div>
-          <div>
-            <button type="button" onClick={() => setInstallAttempt((value) => value + 1)} style={BUTTON_STYLE}>
-              重试
-            </button>
-          </div>
-        </Panel>
+        <FailurePanel
+          title="编辑器资源不可用"
+          message={error ?? '未知错误'}
+          hint="首次使用需要从 GitHub 下载 draw.io 资源包（约 51 MB）并解压到本机 DSH 存储目录。请检查网络后重试。"
+          onRetry={() => setInstallAttempt((value) => value + 1)}
+        />
       )
     }
     const ratio = status !== null && status.total > 0 ? Math.min(1, status.received / status.total) : 0
     return (
       <Panel>
-        <strong>首次使用：正在准备图表编辑器</strong>
-        <div style={{ opacity: 0.85 }}>{progressText(status)}</div>
+        <strong>{phase === 'config' || phase === 'probing' ? '正在准备图表编辑器' : '首次使用：正在准备图表编辑器'}</strong>
+        <div style={{ opacity: 0.85 }}>{phase === 'config' ? '正在读取插件配置…' : progressText(status)}</div>
         <div style={{ height: 6, borderRadius: 3, background: 'rgba(127,127,127,0.25)', overflow: 'hidden' }}>
           <div
             style={{
@@ -432,8 +567,10 @@ function EditorPane(props: {
             ? '未保存'
             : '已同步'
 
+  const diagramsDir = config?.diagramsDir ?? 'docs/diagrams'
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    <div ref={rootRef} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div
         style={{
           display: 'flex',
@@ -450,16 +587,17 @@ function EditorPane(props: {
         </span>
         {doc.compressed ? <span style={{ opacity: 0.55 }}>压缩存储</span> : null}
         <span style={{ opacity: saveState === 'failed' ? 1 : 0.7 }}>{saveLabel}</span>
-        <button type="button" onClick={() => void flush()} style={BUTTON_STYLE}>
-          保存
-        </button>
-        <button type="button" onClick={() => setSaveAsOpen((value) => !value)} style={BUTTON_STYLE}>
-          另存为
-        </button>
-        <button type="button" onClick={() => void reloadFromDisk()} style={BUTTON_STYLE}>
-          重新加载
-        </button>
+        <button type="button" onClick={() => void newDiagram()} style={BUTTON_STYLE}>新建</button>
+        <button type="button" onClick={() => void flush()} style={BUTTON_STYLE}>保存</button>
+        <button type="button" onClick={() => setSaveAsOpen((value) => !value)} style={BUTTON_STYLE}>另存为</button>
+        <button type="button" onClick={() => void reloadFromDisk()} style={BUTTON_STYLE}>重新加载</button>
       </div>
+
+      {narrow ? (
+        <div style={{ padding: '3px 8px', fontSize: 11, opacity: 0.6, borderBottom: '1px solid rgba(127,127,127,0.18)' }}>
+          侧边栏较窄时 draw.io 会收起形状/格式面板 —— 把本标签页拖到主会话区域即可变成可缩放的悬浮窗口。
+        </div>
+      ) : null}
 
       {conflict !== null ? (
         <div
@@ -494,7 +632,7 @@ function EditorPane(props: {
             alignItems: 'center',
           }}
         >
-          <span>另存到 {DIAGRAMS_DIR}/</span>
+          <span>另存到 {diagramsDir}/</span>
           <input
             value={saveAsName}
             onChange={(event) => setSaveAsName(event.target.value)}
@@ -519,7 +657,12 @@ function EditorPane(props: {
       <iframe
         key={editorKey}
         ref={frameRef}
-        src={DRAWIO_EMBED_URL}
+        src={config?.editorUrl !== undefined && config.editorUrl !== ''
+          ? config.editorUrl
+          : drawioEmbedUrl({
+            uiTheme: config?.uiTheme ?? 'kennedy',
+            language: config?.language ?? 'zh',
+          })}
         title={`图表编辑器：${title}`}
         style={{ flex: 1, width: '100%', minHeight: 0, border: 0, background: '#ffffff' }}
       />

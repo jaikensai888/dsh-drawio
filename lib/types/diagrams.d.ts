@@ -34,13 +34,20 @@ export interface DiagramExistsResult {
     mtimeMs?: number;
     size?: number;
 }
-/** Read a `.drawio` inside the workspace, decoding compressed storage. */
-export declare function readDiagram(options: {
+/** The slice of deployment configuration every entry point needs. */
+export interface WorkspaceOptions {
+    /** Authoritative workspace root from the session header. */
     cwd: string;
+    /** Directory for new diagrams, relative to `cwd`. Defaults to `docs/diagrams`. */
+    diagramsDir?: string | undefined;
+    /** Deployment opt-in that drops the containment requirement. Off by default. */
+    allowOutsideWorkspace?: boolean | undefined;
+}
+/** Read a `.drawio` inside the workspace, decoding compressed storage. */
+export declare function readDiagram(options: WorkspaceOptions & {
     path: string;
 }): Promise<DiagramReadResult>;
-export interface WriteDiagramOptions {
-    cwd: string;
+export interface WriteDiagramOptions extends WorkspaceOptions {
     path: string;
     /** Plain mxfile XML from the editor. */
     xml: string;
@@ -59,23 +66,29 @@ export interface WriteDiagramOptions {
  * tool re-compressed is followed rather than fought.
  */
 export declare function writeDiagram(options: WriteDiagramOptions): Promise<DiagramWriteResult>;
-export interface CreateDiagramOptions {
-    cwd: string;
-    /** Directory relative to the workspace; defaults to {@link DEFAULT_DIAGRAMS_DIR}. */
+export interface CreateDiagramOptions extends WorkspaceOptions {
+    /** Directory relative to the workspace; defaults to the configured diagrams directory. */
     directory?: string | undefined;
     /** Base file name without extension; defaults to `untitled`. */
     name?: string | undefined;
+    /**
+     * Create exactly at this path (absolute or workspace-relative) instead of
+     * picking the next free `untitled-N`. Backs the "this file does not exist —
+     * create it?" prompt, where the user already chose the name by typing it.
+     */
+    path?: string | undefined;
 }
-/** Create the next free `<name>-N.drawio` under the workspace diagrams directory. */
+/**
+ * Create a blank diagram — either at a caller-chosen path, or as the next free
+ * `<name>-N.drawio` in the workspace diagrams directory.
+ */
 export declare function createDiagram(options: CreateDiagramOptions): Promise<DiagramReadResult>;
 /** List the diagrams in the workspace diagrams directory, name-sorted. */
-export declare function listDiagrams(options: {
-    cwd: string;
+export declare function listDiagrams(options: WorkspaceOptions & {
     directory?: string | undefined;
 }): Promise<DiagramEntry[]>;
 /** Whether a path exists inside the workspace (used by the "create it?" prompt). */
-export declare function diagramExists(options: {
-    cwd: string;
+export declare function diagramExists(options: WorkspaceOptions & {
     path: string;
 }): Promise<DiagramExistsResult>;
 //# sourceMappingURL=diagrams.d.ts.map

@@ -55,6 +55,29 @@ export interface DiagramExistsResult {
   size?: number
 }
 
+/** Deployment configuration the browser is allowed to see. */
+export interface DrawioClientConfig {
+  editorUrl: string
+  diagramsDir: string
+  autosaveDelayMs: number
+  writeDebounceMs: number
+  uiTheme: string
+  language: string
+  allowOutsideWorkspace: boolean
+  webappVersion: string
+}
+
+/** Workspace identity for the active session. */
+export interface WorkspaceInfo {
+  sessionId: string
+  cwd: string
+  scopeKey: string
+  workspaceId?: string
+  workspaceTitle?: string
+  registered: boolean
+  diagramsDir: string
+}
+
 interface Envelope<T> {
   ok: boolean
   value?: T
@@ -166,10 +189,38 @@ export function writeDiagram(
   )
 }
 
-/** Create the next free `<name>-N.drawio` in the workspace diagrams directory. */
+/** Deployment configuration for this browser session. */
+export function fetchConfig(signal?: AbortSignal): Promise<DrawioClientConfig> {
+  return request<DrawioClientConfig>('/drawio/api/config', {}, 'GET', signal)
+}
+
+let cachedConfig: Promise<DrawioClientConfig> | undefined
+
+/**
+ * Process-wide memo of {@link fetchConfig}. The configuration is deployment
+ * static (only a restart can change it), and every open editor tab would
+ * otherwise re-request it. A failure clears the memo so a retry can succeed.
+ */
+export function clientConfig(): Promise<DrawioClientConfig> {
+  cachedConfig ??= fetchConfig().catch((error: unknown) => {
+    cachedConfig = undefined
+    throw error
+  })
+  return cachedConfig
+}
+
+/** Workspace identity (cwd, scope key, registered name) for a session. */
+export function fetchWorkspace(scope: SessionScope, signal?: AbortSignal): Promise<WorkspaceInfo> {
+  return request<WorkspaceInfo>('/drawio/api/workspace', scopeBody(scope), 'POST', signal)
+}
+
+/**
+ * Create a blank diagram — the next free `<name>-N.drawio` in the configured
+ * diagrams directory, or exactly at `path` when one is given.
+ */
 export function createDiagram(
   scope: SessionScope,
-  options: { directory?: string, name?: string } = {},
+  options: { directory?: string, name?: string, path?: string } = {},
 ): Promise<DiagramReadResult> {
   return request<DiagramReadResult>('/drawio/api/create', { ...scopeBody(scope), ...options })
 }

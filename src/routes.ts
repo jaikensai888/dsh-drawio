@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createWebappAssetHandler } from './assets.js'
+import { clientConfigOf, type DrawioConfig } from './config.js'
 import {
   createDiagram,
   diagramExists,
@@ -7,10 +8,12 @@ import {
   readDiagram,
   writeDiagram,
   type CreateDiagramOptions,
+  type WorkspaceOptions,
 } from './diagrams.js'
 import { DrawioError, readJsonBody, writeError, writeOk } from './net/http.js'
 import { isTrustedApiRequest } from './net/trust-fence.js'
 import type { WebappInstaller } from './webapp-install.js'
+import type { WorkspaceScopeInfo } from './workspace.js'
 
 /**
  * The one and only `webServer.register` call this plugin ever makes.
@@ -30,13 +33,17 @@ type SubRouteHandler = (
 
 export interface DrawioRouteDeps {
   installer: WebappInstaller
+  /** Validated deployment configuration. */
+  config: DrawioConfig
   /** Live non-loopback authorities this deployment serves (from `webRuntime`). */
   trustedHosts: () => readonly string[]
   /**
-   * Authoritative workspace cwd for a session. `header.cwd` wins; the client's
-   * cwd is only a hydration fallback, and `process.cwd()` the last resort.
+   * Workspace identity for a session. `header.cwd` wins; the client's cwd is
+   * only a hydration fallback, and `process.cwd()` the last resort. Re-resolved
+   * on every request because sessions are live and cwd is not cached across
+   * requests.
    */
-  resolveSessionCwd: (sessionId: string, clientCwd?: string) => string
+  resolveWorkspace: (sessionId: string, clientCwd?: string) => Promise<WorkspaceScopeInfo>
 }
 
 /** Build the dispatch table for the single `/drawio` prefix route. */
@@ -46,6 +53,8 @@ export function createDrawioRouteHandler(deps: DrawioRouteDeps): (
 ) => void {
   const exact = new Map<string, SubRouteHandler>([
     ['/ping', handlePing],
+    ['/api/config', (request, response) => handleConfig(request, response, deps)],
+    ['/api/workspace', (request, response) => handleWorkspace(request, response, deps)],
     ['/api/webapp-status', (request, response) => handleWebappStatus(request, response, deps.installer)],
     ['/api/read', (request, response) => handleRead(request, response, deps)],
     ['/api/write', (request, response) => handleWrite(request, response, deps)],
@@ -196,9 +205,42 @@ function optionalNumber(body: Record<string, unknown>, key: string): number | un
   return value
 }
 
-/** Session → authoritative cwd, with the client value as hydration fallback only. */
-function cwdFor(deps: DrawioRouteDeps, body: Record<string, unknown>): string {
-  return deps.resolveSessionCwd(requireSessionId(body), optionalString(body, 'cwd'))
+/**
+ * Session → the full workspace scope every diagram entry point needs.
+ *
+ * The cwd always comes from the session (never the client's copy), and the
+ * containment policy comes from validated deployment config — so a single
+ * place decides whether the workspace is a boundary.
+ */
+async function scopeFor(deps: DrawioRouteDeps, body: Record<string, unknown>): Promise<WorkspaceOptions> {
+  const info = await deps.resolveWorkspace(requireSessionId(body), optionalString(body, 'cwd'))
+  return {
+    cwd: info.cwd,
+    diagramsDir: deps.config.diagramsDir,
+    allowOutsideWorkspace: deps.config.allowOutsideWorkspace,
+  }
+}
+
+/** Client-visible configuration. Read-only; the host owns every value. */
+function handleConfig(
+  request: IncomingMessage,
+  response: ServerResponse,
+  deps: DrawioRouteDeps,
+): void {
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    throw new DrawioError('method-not-allowed', 'GET /drawio/api/config 只接受 GET/HEAD', 405)
+  }
+  writeOk(response, clientConfigOf(deps.config))
+}
+
+async function handleWorkspace(
+  request: IncomingMessage,
+  response: ServerResponse,
+  deps: DrawioRouteDeps,
+): Promise<void> {
+  const body = await requirePostBody(request, 'POST /drawio/api/workspace')
+  const info = await deps.resolveWorkspace(requireSessionId(body), optionalString(body, 'cwd'))
+  writeOk(response, { ...info, diagramsDir: deps.config.diagramsDir })
 }
 
 async function handleRead(
@@ -209,7 +251,7 @@ async function handleRead(
   const body = await requirePostBody(request, 'POST /drawio/api/read')
   const path = optionalString(body, 'path')
   if (path === undefined) throw new DrawioError('bad-request', '缺少 path')
-  writeOk(response, await readDiagram({ cwd: cwdFor(deps, body), path }))
+  writeOk(response, await readDiagram({ ...(await scopeFor(deps, body)), path }))
 }
 
 async function handleWrite(
@@ -224,7 +266,7 @@ async function handleWrite(
   if (typeof xml !== 'string') throw new DrawioError('bad-request', 'xml 必须是字符串')
 
   writeOk(response, await writeDiagram({
-    cwd: cwdFor(deps, body),
+    ...(await scopeFor(deps, body)),
     path,
     xml,
     ifMtimeMs: optionalNumber(body, 'ifMtimeMs'),
@@ -237,11 +279,13 @@ async function handleCreate(
   deps: DrawioRouteDeps,
 ): Promise<void> {
   const body = await requirePostBody(request, 'POST /drawio/api/create')
-  const options: CreateDiagramOptions = { cwd: cwdFor(deps, body) }
+  const options: CreateDiagramOptions = await scopeFor(deps, body)
   const directory = optionalString(body, 'directory')
   if (directory !== undefined) options.directory = directory
   const name = optionalString(body, 'name')
   if (name !== undefined) options.name = name
+  const path = optionalString(body, 'path')
+  if (path !== undefined) options.path = path
   writeOk(response, await createDiagram(options))
 }
 
@@ -252,7 +296,10 @@ async function handleList(
 ): Promise<void> {
   const body = await requirePostBody(request, 'POST /drawio/api/list')
   const directory = optionalString(body, 'directory')
-  writeOk(response, await listDiagrams({ cwd: cwdFor(deps, body), ...(directory === undefined ? {} : { directory }) }))
+  writeOk(response, await listDiagrams({
+    ...(await scopeFor(deps, body)),
+    ...(directory === undefined ? {} : { directory }),
+  }))
 }
 
 async function handleExists(
@@ -263,7 +310,7 @@ async function handleExists(
   const body = await requirePostBody(request, 'POST /drawio/api/exists')
   const path = optionalString(body, 'path')
   if (path === undefined) throw new DrawioError('bad-request', '缺少 path')
-  writeOk(response, await diagramExists({ cwd: cwdFor(deps, body), path }))
+  writeOk(response, await diagramExists({ ...(await scopeFor(deps, body)), path }))
 }
 
 /** Parse a request URL down to its pathname (never throws on junk input). */

@@ -52,7 +52,8 @@
     "react-dom": ">=18.2.0"
   },
   "dependencies": {
-    "adm-zip": "0.6.0"
+    "adm-zip": "0.6.0",
+    "schemastery": "3.18.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",

@@ -1,9 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
+import { Config, resolveDrawioConfig } from './config.js'
 import { requireAbsolute } from './net/fs-fence.js'
 import { DrawioError } from './net/http.js'
 import { createDrawioRouteHandler, DRAWIO_ROUTE_PREFIX } from './routes.js'
-import { WebappInstaller } from './webapp-install.js'
+import { WebappInstaller, webappSourceFor } from './webapp-install.js'
+import { resolveWorkspaceInfo, type WorkspaceRegistryLike, type WorkspaceScopeInfo } from './workspace.js'
+
+export { Config }
 
 /** Host-half plugin name. Must equal the package name. */
 export const name = 'dsh-drawio'
@@ -63,12 +67,28 @@ export function sessionCwdOf(ctx: Sessions, sessionId: string, clientCwd?: strin
  * network until a viewer asks for it, and `/drawio/ping` stays a pure
  * no-side-effect probe.
  *
- * There is intentionally no `Config` yet — P3 adds one together with the
- * `resolveDrawioConfig()` second-line-of-defence resolver (schemastery is
- * non-strict, so unknown yaml keys leak into the resolved config).
+ * `config` arrives from the Loader (validated against {@link Config}, with the
+ * deployment's `cordis.patch.yml` row as the base layer) and is then re-derived
+ * by `resolveDrawioConfig` — schemastery is non-strict, so unknown keys would
+ * otherwise reach the plugin and, from there, the browser.
  */
-export function apply(ctx: DrawioHostContext): void {
-  const installer = new WebappInstaller()
+/** The slice of `workspaceRegistry` this plugin uses (read optionally). */
+type WorkspaceRegistry = WorkspaceRegistryLike
+
+/**
+ * Host half: register exactly one prefix route and let `routes.ts` dispatch.
+ *
+ * The self-hosted drawio webapp is fetched lazily — nothing touches the
+ * network until a viewer asks for it, and `/drawio/ping` stays a pure
+ * no-side-effect probe.
+ */
+export function apply(ctx: DrawioHostContext, config?: unknown): void {
+  // Deployment values are re-derived from scratch: schemastery is non-strict,
+  // so unknown yaml keys would otherwise reach us (GROUND-TRUTH pitfall #9).
+  const resolved = resolveDrawioConfig(config)
+  const installer = new WebappInstaller({
+    source: webappSourceFor(resolved.drawioVersion, resolved.drawioSha256),
+  })
 
   // `webRuntime` is read through ctx.get rather than injected: it is only a
   // trust-fence input, and a missing service must degrade to "loopback only"
@@ -84,16 +104,28 @@ export function apply(ctx: DrawioHostContext): void {
     }
   }
 
-  const resolveSessionCwd = (sessionId: string, clientCwd?: string): string => {
+  // `workspaceRegistry` depends on the storage domain, so it may simply not
+  // exist — read it optionally and let workspace.ts fall back to realpath(cwd).
+  const registry = (): WorkspaceRegistry | undefined => {
     try {
-      return sessionCwdOf(ctx.sessions, sessionId, clientCwd)
+      return ctx.get('workspaceRegistry', false) as WorkspaceRegistry | undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  const resolveWorkspace = async (sessionId: string, clientCwd?: string): Promise<WorkspaceScopeInfo> => {
+    let cwd: string
+    try {
+      cwd = sessionCwdOf(ctx.sessions, sessionId, clientCwd)
     } catch (error) {
       if (error instanceof DrawioError) throw error
       throw new DrawioError('bad-request', `无法确定会话工作区：${(error as Error).message}`)
     }
+    return resolveWorkspaceInfo({ sessionId, cwd, registry: registry() })
   }
 
-  const handler = createDrawioRouteHandler({ installer, trustedHosts, resolveSessionCwd })
+  const handler = createDrawioRouteHandler({ installer, config: resolved, trustedHosts, resolveWorkspace })
 
   ctx.effect(() => {
     const disposeRoute = ctx.webServer.register({
@@ -101,7 +133,7 @@ export function apply(ctx: DrawioHostContext): void {
       path: DRAWIO_ROUTE_PREFIX,
       handler,
     })
-    console.log(`[dsh-drawio] prefix route registered: ${DRAWIO_ROUTE_PREFIX} (webapp root ${installer.webappRoot})`)
+    console.log(`[dsh-drawio] prefix route registered: ${DRAWIO_ROUTE_PREFIX} (webapp root ${installer.webappRoot}, diagrams ${resolved.diagramsDir})`)
 
     return () => {
       console.log(`[dsh-drawio] prefix route disposed: ${DRAWIO_ROUTE_PREFIX}`)

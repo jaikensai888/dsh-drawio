@@ -2,12 +2,14 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { FileViewerDescriptor, SessionScope } from 'dsh-better-sidebar/client/service';
 import { type DiagramLoadPayload } from './DiagramViewer.js';
 /**
- * Client-half plugin: register a `.drawio` file previewer on the
- * dsh-better-sidebar service. `inject` holds *cordis service names* — do not
- * confuse it with `dsh.client.inject` in package.json, which holds package
- * names and only controls client-bundle arrival order.
+ * Client-half plugin.
+ *
+ * `inject` holds *cordis service names* — do not confuse it with
+ * `dsh.client.inject` in package.json, which holds package names and only
+ * controls client-bundle arrival order. `slots` is the UI slot registry the
+ * official sidebar declares `sidebar.footer.action` on.
  */
-export declare const inject: readonly ["betterSidebar"];
+export declare const inject: readonly ["betterSidebar", "slots"];
 /** Namespaced so it can never collide with a builtin viewer id. */
 export declare const DIAGRAM_VIEWER_ID = "dsh-drawio:diagram";
 /**

@@ -9,17 +9,23 @@
  * payload goes through a guarded `JSON.parse` because a malformed string from
  * the frame must not be able to throw inside a message listener.
  */
-/** Editor document URL, relative to the DSH origin it is served from. */
+/** Editor document URL on this origin, used when no `editorUrl` escape hatch is set. */
 export declare const DRAWIO_EMBED_PATH = "/drawio/webapp/index.html";
+export interface DrawioEmbedOptions {
+    /** drawio `ui` parameter (`kennedy` is the full editor). */
+    uiTheme: string;
+    /** BCP-47-ish UI language, passed to drawio's own i18n. */
+    language: string;
+}
 /**
+ * Build the editor URL.
+ *
  * `embed=1&proto=json` switches drawio to its postMessage transport.
  * `spin=1` is drawio's own loading spinner, `configure=1` makes it wait for our
  * configure reply before initialising, `stealth=1` + `suppressNewWindows=1`
- * keep it from sprouting chrome or popups, `lang=zh` localises the UI.
+ * keep it from sprouting chrome or popups, and `lang` localises the UI.
  */
-export declare const DRAWIO_EMBED_QUERY: string;
-/** Full editor URL for the iframe `src`. */
-export declare const DRAWIO_EMBED_URL: string;
+export declare function drawioEmbedUrl(options: DrawioEmbedOptions): string;
 /**
  * Answer to drawio's `configure` event.
  *
@@ -35,6 +41,7 @@ export declare const DRAWIO_EMBED_URL: string;
  */
 export declare function drawioConfig(options: {
     compressed: boolean;
+    autosaveDelayMs: number;
 }): Record<string, unknown>;
 export interface DrawioEmbedChannelOptions {
     /** Resolved lazily so the channel can be built before the frame mounts. */

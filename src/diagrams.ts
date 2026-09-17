@@ -3,7 +3,7 @@ import type { Stats } from 'node:fs'
 import { extname, join } from 'node:path'
 import { decodeMxfile, mxfileStyle, reshapeToStyle, type MxfileStyle } from './drawio-xml.js'
 import { writeFileAtomic } from './net/atomic-write.js'
-import { relativeToBase, resolveRequestPath, resolveWithinBase } from './net/fs-fence.js'
+import { relativeToBase, resolveRequestPath, resolveWithinBase, type FenceOptions } from './net/fs-fence.js'
 import { DrawioError } from './net/http.js'
 
 /** Sub-directory new diagrams land in, relative to the workspace. */
@@ -81,9 +81,29 @@ function isDiagramFileName(name: string): boolean {
   return DIAGRAM_EXTENSIONS.includes(extname(name).slice(1).toLowerCase())
 }
 
+/** The slice of deployment configuration every entry point needs. */
+export interface WorkspaceOptions {
+  /** Authoritative workspace root from the session header. */
+  cwd: string
+  /** Directory for new diagrams, relative to `cwd`. Defaults to `docs/diagrams`. */
+  diagramsDir?: string | undefined
+  /** Deployment opt-in that drops the containment requirement. Off by default. */
+  allowOutsideWorkspace?: boolean | undefined
+}
+
+function fenceOf(options: WorkspaceOptions): FenceOptions {
+  return { allowOutside: options.allowOutsideWorkspace === true }
+}
+
+function diagramsDirOf(options: WorkspaceOptions): string {
+  return options.diagramsDir === undefined || options.diagramsDir === ''
+    ? DEFAULT_DIAGRAMS_DIR
+    : options.diagramsDir
+}
+
 /** Read a `.drawio` inside the workspace, decoding compressed storage. */
-export async function readDiagram(options: { cwd: string, path: string }): Promise<DiagramReadResult> {
-  const target = resolveRequestPath(options.cwd, options.path)
+export async function readDiagram(options: WorkspaceOptions & { path: string }): Promise<DiagramReadResult> {
+  const target = resolveRequestPath(options.cwd, options.path, 'path', fenceOf(options))
   const relativePath = relativeToBase(options.cwd, target)
 
   const info = await statOrUndefined(target)
@@ -122,8 +142,7 @@ export async function readDiagram(options: { cwd: string, path: string }): Promi
   }
 }
 
-export interface WriteDiagramOptions {
-  cwd: string
+export interface WriteDiagramOptions extends WorkspaceOptions {
   path: string
   /** Plain mxfile XML from the editor. */
   xml: string
@@ -150,7 +169,7 @@ export async function writeDiagram(options: WriteDiagramOptions): Promise<Diagra
     throw new DrawioError('bad-request', '图纸内容过大')
   }
 
-  const target = resolveRequestPath(options.cwd, options.path)
+  const target = resolveRequestPath(options.cwd, options.path, 'path', fenceOf(options))
   const relativePath = relativeToBase(options.cwd, target)
   const existing = await statOrUndefined(target)
 
@@ -216,12 +235,17 @@ export async function writeDiagram(options: WriteDiagramOptions): Promise<Diagra
   }
 }
 
-export interface CreateDiagramOptions {
-  cwd: string
-  /** Directory relative to the workspace; defaults to {@link DEFAULT_DIAGRAMS_DIR}. */
+export interface CreateDiagramOptions extends WorkspaceOptions {
+  /** Directory relative to the workspace; defaults to the configured diagrams directory. */
   directory?: string | undefined
   /** Base file name without extension; defaults to `untitled`. */
   name?: string | undefined
+  /**
+   * Create exactly at this path (absolute or workspace-relative) instead of
+   * picking the next free `untitled-N`. Backs the "this file does not exist —
+   * create it?" prompt, where the user already chose the name by typing it.
+   */
+  path?: string | undefined
 }
 
 /** Reject anything that could steer the new file out of its directory. */
@@ -233,10 +257,43 @@ function safeBaseName(value: string): string {
   return trimmed
 }
 
-/** Create the next free `<name>-N.drawio` under the workspace diagrams directory. */
+async function writeBlank(cwd: string, target: string): Promise<DiagramReadResult> {
+  try {
+    await writeFileAtomic(target, BLANK_MXFILE, { mode: FILE_MODE })
+  } catch (error) {
+    throw new DrawioError('fs-error', `创建图纸失败：${(error as Error).message}`, 500)
+  }
+  const info = await stat(target)
+  return {
+    path: target,
+    relativePath: relativeToBase(cwd, target),
+    xml: BLANK_MXFILE,
+    compressed: false,
+    mtimeMs: info.mtimeMs,
+    size: info.size,
+  }
+}
+
+/**
+ * Create a blank diagram — either at a caller-chosen path, or as the next free
+ * `<name>-N.drawio` in the workspace diagrams directory.
+ */
 export async function createDiagram(options: CreateDiagramOptions): Promise<DiagramReadResult> {
-  const directory = options.directory ?? DEFAULT_DIAGRAMS_DIR
-  const dir = resolveWithinBase(options.cwd, join(options.cwd, directory))
+  if (options.path !== undefined && options.path.trim() !== '') {
+    const target = resolveRequestPath(options.cwd, options.path, 'path', fenceOf(options))
+    const existing = await statOrUndefined(target)
+    if (existing !== undefined) {
+      throw new DrawioError('conflict', `文件已存在，未覆盖：${relativeToBase(options.cwd, target)}`, 409, {
+        reason: 'exists',
+        currentMtimeMs: Math.round(existing.mtimeMs),
+      })
+    }
+    const created = await writeBlank(options.cwd, target)
+    return created
+  }
+
+  const directory = options.directory ?? diagramsDirOf(options)
+  const dir = resolveWithinBase(options.cwd, join(options.cwd, directory), 'directory', fenceOf(options))
   const base = safeBaseName(options.name ?? 'untitled')
 
   const existingNames = new Set<string>()
@@ -261,27 +318,16 @@ export async function createDiagram(options: CreateDiagramOptions): Promise<Diag
     throw new DrawioError('fs-error', `目录 ${directory} 下 ${base}-N.drawio 已用尽`, 500)
   }
 
-  try {
-    await writeFileAtomic(target, BLANK_MXFILE, { mode: FILE_MODE })
-  } catch (error) {
-    throw new DrawioError('fs-error', `创建图纸失败：${(error as Error).message}`, 500)
-  }
-
-  const info = await stat(target)
-  return {
-    path: target,
-    relativePath: relativeToBase(options.cwd, target),
-    xml: BLANK_MXFILE,
-    compressed: false,
-    mtimeMs: info.mtimeMs,
-    size: info.size,
-  }
+  const created = await writeBlank(options.cwd, target)
+  return created
 }
 
 /** List the diagrams in the workspace diagrams directory, name-sorted. */
-export async function listDiagrams(options: { cwd: string, directory?: string | undefined }): Promise<DiagramEntry[]> {
-  const directory = options.directory ?? DEFAULT_DIAGRAMS_DIR
-  const dir = resolveWithinBase(options.cwd, join(options.cwd, directory))
+export async function listDiagrams(
+  options: WorkspaceOptions & { directory?: string | undefined },
+): Promise<DiagramEntry[]> {
+  const directory = options.directory ?? diagramsDirOf(options)
+  const dir = resolveWithinBase(options.cwd, join(options.cwd, directory), 'directory', fenceOf(options))
 
   let dirents
   try {
@@ -311,8 +357,10 @@ export async function listDiagrams(options: { cwd: string, directory?: string | 
 }
 
 /** Whether a path exists inside the workspace (used by the "create it?" prompt). */
-export async function diagramExists(options: { cwd: string, path: string }): Promise<DiagramExistsResult> {
-  const target = resolveRequestPath(options.cwd, options.path)
+export async function diagramExists(
+  options: WorkspaceOptions & { path: string },
+): Promise<DiagramExistsResult> {
+  const target = resolveRequestPath(options.cwd, options.path, 'path', fenceOf(options))
   const info = await statOrUndefined(target)
   if (info === undefined) return { exists: false, isFile: false }
   return { exists: true, isFile: info.isFile(), mtimeMs: info.mtimeMs, size: info.size }

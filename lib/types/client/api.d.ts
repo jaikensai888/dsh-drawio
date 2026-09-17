@@ -47,6 +47,27 @@ export interface DiagramExistsResult {
     mtimeMs?: number;
     size?: number;
 }
+/** Deployment configuration the browser is allowed to see. */
+export interface DrawioClientConfig {
+    editorUrl: string;
+    diagramsDir: string;
+    autosaveDelayMs: number;
+    writeDebounceMs: number;
+    uiTheme: string;
+    language: string;
+    allowOutsideWorkspace: boolean;
+    webappVersion: string;
+}
+/** Workspace identity for the active session. */
+export interface WorkspaceInfo {
+    sessionId: string;
+    cwd: string;
+    scopeKey: string;
+    workspaceId?: string;
+    workspaceTitle?: string;
+    registered: boolean;
+    diagramsDir: string;
+}
 /** A host-reported failure, with enough structure for the UI to branch on. */
 export declare class DrawioApiError extends Error {
     readonly status: number;
@@ -68,10 +89,24 @@ export declare function readDiagram(scope: SessionScope, path: string, signal?: 
  * to overwrite deliberately.
  */
 export declare function writeDiagram(scope: SessionScope, path: string, xml: string, ifMtimeMs?: number, signal?: AbortSignal): Promise<DiagramWriteResult>;
-/** Create the next free `<name>-N.drawio` in the workspace diagrams directory. */
+/** Deployment configuration for this browser session. */
+export declare function fetchConfig(signal?: AbortSignal): Promise<DrawioClientConfig>;
+/**
+ * Process-wide memo of {@link fetchConfig}. The configuration is deployment
+ * static (only a restart can change it), and every open editor tab would
+ * otherwise re-request it. A failure clears the memo so a retry can succeed.
+ */
+export declare function clientConfig(): Promise<DrawioClientConfig>;
+/** Workspace identity (cwd, scope key, registered name) for a session. */
+export declare function fetchWorkspace(scope: SessionScope, signal?: AbortSignal): Promise<WorkspaceInfo>;
+/**
+ * Create a blank diagram — the next free `<name>-N.drawio` in the configured
+ * diagrams directory, or exactly at `path` when one is given.
+ */
 export declare function createDiagram(scope: SessionScope, options?: {
     directory?: string;
     name?: string;
+    path?: string;
 }): Promise<DiagramReadResult>;
 /** List the diagrams in the workspace diagrams directory. */
 export declare function listDiagrams(scope: SessionScope, directory?: string): Promise<DiagramEntry[]>;

@@ -55,6 +55,16 @@ export function requireAbsolute(value: unknown, label = 'path'): string {
   return resolve(trimmed)
 }
 
+/** Per-call containment policy. */
+export interface FenceOptions {
+  /**
+   * Deployment opt-in (`allowOutsideWorkspace`) that drops the containment
+   * requirement entirely. Off by default; when on, `cwd` is still the base a
+   * relative request resolves against — it just stops being a boundary.
+   */
+  allowOutside?: boolean
+}
+
 /**
  * Resolve a caller path under `base`, refusing anything that escapes it.
  *
@@ -62,10 +72,15 @@ export function requireAbsolute(value: unknown, label = 'path'): string {
  * hard-coded `/`: on Windows `resolve()` yields backslashes, so comparing
  * against `${base}/` would reject every legitimate sub-path.
  */
-export function resolveWithinBase(base: string, candidate: string, label = 'path'): string {
+export function resolveWithinBase(
+  base: string,
+  candidate: string,
+  label = 'path',
+  options: FenceOptions = {},
+): string {
   const normalizedBase = resolve(base)
   const target = resolve(normalize(candidate))
-  if (!isWithin(normalizedBase, target)) {
+  if (options.allowOutside !== true && !isWithin(normalizedBase, target)) {
     throw new DrawioError('forbidden', `${label} 越出当前工作区：${candidate}`, 403)
   }
   return target
@@ -76,14 +91,19 @@ export function resolveWithinBase(base: string, candidate: string, label = 'path
  * Both forms are accepted because better-sidebar hands the editor a path it
  * built from its own tree, and the host must not assume which one it chose.
  */
-export function resolveRequestPath(base: string, raw: unknown, label = 'path'): string {
+export function resolveRequestPath(
+  base: string,
+  raw: unknown,
+  label = 'path',
+  options: FenceOptions = {},
+): string {
   if (typeof raw !== 'string' || raw.trim() === '') {
     throw new DrawioError('bad-request', `${label} 必须是非空字符串`)
   }
   const value = raw.trim()
   const normalizedBase = resolve(base)
   const candidate = isAbsolute(value) ? resolve(value) : resolve(normalizedBase, value)
-  if (!isWithin(normalizedBase, candidate)) {
+  if (options.allowOutside !== true && !isWithin(normalizedBase, candidate)) {
     throw new DrawioError('forbidden', `${label} 越出当前工作区：${value}`, 403)
   }
   return candidate

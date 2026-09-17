@@ -3,19 +3,29 @@ import type {} from 'dsh-better-sidebar'
 import type { FileViewerDescriptor, FileViewerProps, SessionScope } from 'dsh-better-sidebar/client/service'
 import { DrawioApiError, readDiagram } from './api.js'
 import { DiagramViewer, type DiagramLoadPayload } from './DiagramViewer.js'
+import { FOOTER_ACTION_SLOT, NewDiagramButton } from './NewDiagramButton.js'
 
 /**
- * Client-half plugin: register a `.drawio` file previewer on the
- * dsh-better-sidebar service. `inject` holds *cordis service names* — do not
- * confuse it with `dsh.client.inject` in package.json, which holds package
- * names and only controls client-bundle arrival order.
+ * Client-half plugin.
+ *
+ * `inject` holds *cordis service names* — do not confuse it with
+ * `dsh.client.inject` in package.json, which holds package names and only
+ * controls client-bundle arrival order. `slots` is the UI slot registry the
+ * official sidebar declares `sidebar.footer.action` on.
  */
-export const inject = ['betterSidebar'] as const
+export const inject = ['betterSidebar', 'slots'] as const
 
 /** Namespaced so it can never collide with a builtin viewer id. */
 export const DIAGRAM_VIEWER_ID = 'dsh-drawio:diagram'
 
 const VIEWER_TITLE = '图表编辑器'
+
+/** The slice of the slot registry this plugin uses. */
+interface SlotsService {
+  register(options: Record<string, unknown>, component: unknown): () => void
+  /** Runs the callback per declaration lifetime of the slot; a no-op while undeclared. */
+  inject(key: string, callback: () => () => void): () => void
+}
 
 /**
  * Load a diagram through our own fenced host route.
@@ -63,4 +73,18 @@ export function apply(ctx: Context): void {
   // disposal so HMR / unmount never leaves a duplicate registration behind
   // (a duplicate id throws).
   ctx.effect(() => ctx.betterSidebar.registerFileViewer(createDiagramViewerDescriptor()))
+
+  const slots = (ctx as Context & { slots?: SlotsService }).slots
+  if (slots === undefined) return
+
+  // `slots.inject` waits for the sidebar's declaration instead of racing it:
+  // an undeclared slot throws at register() time, and a declaration that
+  // collapses later disposes this entry and re-runs the callback.
+  ctx.effect(() => slots.inject(FOOTER_ACTION_SLOT, () => slots.register({
+    name: FOOTER_ACTION_SLOT,
+    // `list`-kind slots key their entries by id.
+    id: 'dsh-drawio:new-diagram',
+    order: 100,
+    registrant: 'dsh-drawio',
+  }, () => <NewDiagramButton ctx={ctx} />)))
 }

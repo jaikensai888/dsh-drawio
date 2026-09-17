@@ -10,30 +10,39 @@
  * the frame must not be able to throw inside a message listener.
  */
 
-/** Editor document URL, relative to the DSH origin it is served from. */
+/** Editor document URL on this origin, used when no `editorUrl` escape hatch is set. */
 export const DRAWIO_EMBED_PATH = '/drawio/webapp/index.html'
 
+export interface DrawioEmbedOptions {
+  /** drawio `ui` parameter (`kennedy` is the full editor). */
+  uiTheme: string
+  /** BCP-47-ish UI language, passed to drawio's own i18n. */
+  language: string
+}
+
 /**
+ * Build the editor URL.
+ *
  * `embed=1&proto=json` switches drawio to its postMessage transport.
  * `spin=1` is drawio's own loading spinner, `configure=1` makes it wait for our
  * configure reply before initialising, `stealth=1` + `suppressNewWindows=1`
- * keep it from sprouting chrome or popups, `lang=zh` localises the UI.
+ * keep it from sprouting chrome or popups, and `lang` localises the UI.
  */
-export const DRAWIO_EMBED_QUERY = [
-  'embed=1',
-  'proto=json',
-  'spin=1',
-  'ui=kennedy',
-  'libraries=1',
-  'configure=1',
-  'plugins=0',
-  'stealth=1',
-  'suppressNewWindows=1',
-  'lang=zh',
-].join('&')
-
-/** Full editor URL for the iframe `src`. */
-export const DRAWIO_EMBED_URL = `${DRAWIO_EMBED_PATH}?${DRAWIO_EMBED_QUERY}`
+export function drawioEmbedUrl(options: DrawioEmbedOptions): string {
+  const query = [
+    'embed=1',
+    'proto=json',
+    'spin=1',
+    `ui=${encodeURIComponent(options.uiTheme)}`,
+    'libraries=1',
+    'configure=1',
+    'plugins=0',
+    'stealth=1',
+    'suppressNewWindows=1',
+    `lang=${encodeURIComponent(options.language)}`,
+  ].join('&')
+  return `${DRAWIO_EMBED_PATH}?${query}`
+}
 
 /**
  * Answer to drawio's `configure` event.
@@ -48,12 +57,12 @@ export const DRAWIO_EMBED_URL = `${DRAWIO_EMBED_PATH}?${DRAWIO_EMBED_QUERY}`
  * *unmodified* page's bytes identical between saves, which is what stops a
  * one-shape edit from rewriting every page in a compressed multi-page file.
  */
-export function drawioConfig(options: { compressed: boolean }): Record<string, unknown> {
+export function drawioConfig(options: { compressed: boolean, autosaveDelayMs: number }): Record<string, unknown> {
   return {
     lockdown: true,
     plugins: [],
     compressXml: options.compressed,
-    autosaveDelay: 1500,
+    autosaveDelay: options.autosaveDelayMs,
     preserveViewState: true,
     noAutoFocus: true,
     compact: true,
