@@ -208,6 +208,9 @@ function EditorPane(props: {
         const current = error.details?.['currentMtimeMs']
         setConflict({ message: error.message, currentMtimeMs: typeof current === 'number' ? current : null })
         pausedRef.current = true
+        // Leave 'saving' behind: the write did not land and will not retry until
+        // the user resolves the conflict.
+        setSaveState('failed')
       } else {
         setSaveError(error instanceof Error ? error.message : String(error))
         setSaveState('failed')
@@ -233,9 +236,15 @@ function EditorPane(props: {
   }, [flush])
 
   // Flush anything still pending when the viewer unmounts (tab close, HMR).
+  //
+  // Deliberately NOT forced: with an unresolved conflict on screen, silently
+  // overwriting the file here would be exactly the clobber the 409 exists to
+  // prevent. `flush()` already returns early while `pausedRef` is set, so a
+  // closed tab leaves the external change intact and the local edit discarded —
+  // the outcome the user was warned about.
   useEffect(() => () => {
     if (timerRef.current !== null) globalThis.clearTimeout(timerRef.current)
-    if (pendingRef.current !== null && !pausedRef.current) void flush({ force: true })
+    if (pendingRef.current !== null && !pausedRef.current) void flush()
   }, [flush])
 
   // Last-resort guard for a browser reload / window close with unsaved work.
@@ -411,15 +420,17 @@ function EditorPane(props: {
     )
   }
 
-  const saveLabel = saveState === 'saving'
-    ? '保存中…'
-    : saveState === 'saved'
-      ? '已保存'
-      : saveState === 'failed'
-        ? '保存失败'
-        : dirty
-          ? '未保存'
-          : '已同步'
+  const saveLabel = conflict !== null
+    ? '有冲突'
+    : saveState === 'saving'
+      ? '保存中…'
+      : saveState === 'saved'
+        ? '已保存'
+        : saveState === 'failed'
+          ? '保存失败'
+          : dirty
+            ? '未保存'
+            : '已同步'
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>

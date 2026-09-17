@@ -790,3 +790,75 @@ client 半同理：boot graph 是启动时扫的，客户端也别指望刷新�
 9.1 里手工签的 `dsh-auth-*` cookie **在 DSH Desktop 重启后仍然可用**——
 secret 持久化在 `~/.dsh/.credentials.yaml`，重启只换 launch token，不换 secret。
 24 小时内可以一直用同一个 cookie 驱动 GUI。
+
+---
+
+## 11. P2 期间新增核实（2026-09-17，全部 `[实测]`）
+
+### 11.1 drawio 的压缩编解码器（第 6.3 节得到确认，并补齐细节）
+
+源码位置 `js/grapheditor/Graph.js`：
+
+```js
+Graph.compress = function(data, deflate) {          // 不传 deflate → raw
+  var tmp = (deflate) ? pako.deflate(encodeURIComponent(data))
+                      : pako.deflateRaw(encodeURIComponent(data));
+  return btoa(Graph.arrayBufferToString(new Uint8Array(tmp)));
+};
+Graph.decompress = function(data, inflate, checked) {
+  var tmp = Graph.stringToArrayBuffer(atob(data));
+  var inflated = decodeURIComponent((inflate) ? pako.inflate(tmp, {to:'string'})
+                                              : pako.inflateRaw(tmp, {to:'string'}));
+  return (checked) ? inflated : Graph.zapGremlins(inflated);
+};
+```
+
+- `.drawio` 文件里的 `<diagram>` 压缩走的是**不带 flag 的分支 → `deflateRaw` / `inflateRaw`**
+  （`DrawioFile.js:2677 / 2684`、`EditorUi.js:2098 / 2110` 都这么调）。
+  第 6.3 节写的 windowBits −15 是**对的**；pako 的 zlib 变体只服务于另一些调用点。
+- 因此 Node 侧对应 `zlib.deflateRawSync` / `inflateRawSync`，**不要**用 `deflateSync`。
+
+### 11.2 🔴 **Node zlib 无法复现 pako 的字节**
+
+把 8 个 level × 2 个 memLevel + 3 种 strategy **共 20 组参数全试过，没有一组**
+能让 `zlib.deflateRawSync(encodeURIComponent(xml))` 输出等于 drawio `Graph.compress(xml)` 的结果
+（同一输入：我们 368 字符，drawio 364 字符，都能正常解回原文）。
+
+**含义**：不要写出"我们自己压一遍再写回"的实现——那会在每次保存时把整份压缩内容换掉，
+哪怕只改了一个形状。
+**对策（已落地）**：
+1. `configure` 里的 `compressXml` **跟着文件的存储样式走**，让 drawio 用自己的 pako 输出压缩内容，
+   每个 `<diagram>` 独立压缩 → 没改动的页字节不变。
+2. `writeDiagram` 在解码后的文档与磁盘一致时**直接不落盘**。
+
+### 11.3 drawio 保存时会**归一化** `<mxfile>`
+
+`ui.getFileData(true)` 出来的是光秃秃的 `<mxfile>`，**丢掉** `host=` / `agent=` / `version=`
+这些属性（我们自己生成的空白模板带着它们）。所以"打开后没改就保存"会在这三个属性上产生一行 diff。
+`writeDiagram` 的"未改动就不写"守卫比的是**整篇文档**，因此只在文件本来就是 drawio 归一化形态时命中；
+这已经覆盖了"上次由 drawio 保存过"的绝大多数文件（此时连一行 diff 都没有）。
+
+### 11.4 `@deepseek-ai/dsh-atomic-write` 装不上
+
+- DSH Desktop 装的是 `0.1.2-alpha.1`，但 **npm 上根本没有这个版本**
+  （`pnpm view ... versions` 只有 `0.1.2-alpha.2` 起；`latest` 还停在 `0.0.1-rc.1`）。
+- → 不要 `import` 它。本项目按相同契约把 `writeFileAtomic` 抄进了 `src/net/atomic-write.ts`
+  （随机后缀兄弟文件 + `wx` 独占创建 + rename + 失败清理），与第 5.4 节描述的行为一致。
+
+### 11.5 `dsh-client-hmr` 在本机**没有**把 client 半热替换掉
+
+第 3.5 节说改 client 能被 `dsh-client-hmr` 轮询 `lib/client.js` 热替换、**不用刷新**。
+**实测不成立**：`pnpm build` 重写了 `lib/client.js` 之后等了 6 秒以上，
+页面上仍是旧组件的文案（`保存中…` 而不是新写的 `有冲突`），中间还进行了多次交互；
+**只有刷新页面之后新代码才生效**。
+
+（两种解释没能区分开：HMR 根本没换模块，或者模块换了但已挂载的 React 组件实例没有被重挂载。
+无论哪种，**以"改完 client 请刷新页面"为准**——刷新很便宜，而且不会被误导。）
+
+### 11.6 GUI 驱动的实际手感（补充 9.1）
+
+- 侧边栏的"刷新"按钮在 `x≈1446,y≈55`（`aria-label="刷新"`），
+  外部新增文件后**必须点它**文件树才会出现；单纯展开目录不会重新读盘。
+- 编辑器标签页的关闭按钮是 `[class*="tabClose"]`，**不在** `[class*="paneTab"]` 内部，
+  按 `x` 坐标顺序与标签栏一一对应，`y=17`。
+- 关掉标签页后再从文件树点开，是验证"保存→重开一致"的最短路径。
