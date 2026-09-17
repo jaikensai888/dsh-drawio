@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { join, resolve } from 'node:path'
 import { etagFor, parseRange, relativeAssetPath, resolveWithinRoot, WEBAPP_MOUNT } from '../src/assets.js'
 import { DrawioError } from '../src/net/http.js'
 import { isDocumentType, mimeTypeForPath } from '../src/net/mime.js'
@@ -96,8 +97,18 @@ describe('resolveWithinRoot — the path.sep regression', () => {
 
   it('rejects escapes with forward slashes, backslashes and mixed forms', () => {
     const root = process.cwd()
-    for (const relative of ['../x.js', 'js/../../x.js', '..\\x.js', 'js\\..\\..\\x.js', './../x.js']) {
+    // Forward slashes separate on every platform, so these escape everywhere.
+    for (const relative of ['../x.js', 'js/../../x.js', './../x.js']) {
       expect(() => resolveWithinRoot(root, relative)).toThrow(DrawioError)
+    }
+    // A backslash separates only on Windows; on POSIX the same text names a
+    // file *inside* the root, so containment must hold instead of throwing.
+    for (const relative of ['..\\x.js', 'js\\..\\..\\x.js']) {
+      if (process.platform === 'win32') {
+        expect(() => resolveWithinRoot(root, relative)).toThrow(DrawioError)
+      } else {
+        expect(resolveWithinRoot(root, relative)).toBe(join(resolve(root), relative))
+      }
     }
   })
 

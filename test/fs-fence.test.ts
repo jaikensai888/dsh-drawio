@@ -69,8 +69,21 @@ describe('resolveWithinBase — the path.sep regression', () => {
   })
 
   it('rejects escapes written with forward slashes, backslashes and mixed forms', () => {
-    for (const escape of ['../x.drawio', '..\\x.drawio', 'a/../../x.drawio', 'a\\..\\..\\x.drawio']) {
+    // Forward slashes separate on every platform, so these escape everywhere.
+    for (const escape of ['../x.drawio', 'a/../../x.drawio']) {
       expect(() => resolveWithinBase(base, join(base, escape))).toThrow(DrawioError)
+    }
+    // A backslash separates only on Windows. On POSIX it is an ordinary
+    // filename character, so `..\x.drawio` is a legal name *inside* the base:
+    // the guard must keep it, and must not mistake the text for an escape.
+    for (const escape of ['..\\x.drawio', 'a\\..\\..\\x.drawio']) {
+      const target = join(base, escape)
+      if (process.platform === 'win32') {
+        expect(() => resolveWithinBase(base, target)).toThrow(DrawioError)
+      } else {
+        expect(isWithin(base, target)).toBe(true)
+        expect(resolveWithinBase(base, target)).toBe(target)
+      }
     }
   })
 
@@ -103,7 +116,13 @@ describe('resolveRequestPath', () => {
 
   it('refuses a relative escape', () => {
     expect(() => resolveRequestPath(base, '../../etc/passwd')).toThrow(DrawioError)
-    expect(() => resolveRequestPath(base, '..\\..\\windows\\system32\\config')).toThrow(DrawioError)
+    // `..\..\x` traverses only where a backslash is a separator (Windows).
+    const backslashed = '..\\..\\windows\\system32\\config'
+    if (process.platform === 'win32') {
+      expect(() => resolveRequestPath(base, backslashed)).toThrow(DrawioError)
+    } else {
+      expect(resolveRequestPath(base, backslashed)).toBe(resolve(base, backslashed))
+    }
   })
 
   it('refuses an absolute path outside the workspace', () => {
