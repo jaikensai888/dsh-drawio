@@ -1,0 +1,126 @@
+/**
+ * draw.io embed protocol over `postMessage`.
+ *
+ * Two directions, two different safety rules:
+ *   host → iframe : always an explicit `targetOrigin` (never `*`)
+ *   iframe → host : the sender must be OUR frame AND same-origin
+ *
+ * drawio's own sample only compares `evt.source`; we check both, and every
+ * payload goes through a guarded `JSON.parse` because a malformed string from
+ * the frame must not be able to throw inside a message listener.
+ */
+
+/** Editor document URL, relative to the DSH origin it is served from. */
+export const DRAWIO_EMBED_PATH = '/drawio/webapp/index.html'
+
+/**
+ * `embed=1&proto=json` switches drawio to its postMessage transport.
+ * `spin=1` is drawio's own loading spinner, `configure=1` makes it wait for our
+ * configure reply before initialising, `stealth=1` + `suppressNewWindows=1`
+ * keep it from sprouting chrome or popups, `lang=zh` localises the UI.
+ */
+export const DRAWIO_EMBED_QUERY = [
+  'embed=1',
+  'proto=json',
+  'spin=1',
+  'ui=kennedy',
+  'libraries=1',
+  'configure=1',
+  'plugins=0',
+  'stealth=1',
+  'suppressNewWindows=1',
+  'lang=zh',
+].join('&')
+
+/** Full editor URL for the iframe `src`. */
+export const DRAWIO_EMBED_URL = `${DRAWIO_EMBED_PATH}?${DRAWIO_EMBED_QUERY}`
+
+/**
+ * Answer to drawio's `configure` event.
+ *
+ * `lockdown: true` cuts every data channel except browser ↔ user-chosen
+ * storage; the CSP we serve the webapp with (`connect-src 'self'`) is the
+ * actual network-level gate behind it.
+ */
+export const DRAWIO_CONFIG: Readonly<Record<string, unknown>> = {
+  lockdown: true,
+  plugins: [],
+  compressXml: false,
+  autosaveDelay: 1500,
+  preserveViewState: true,
+  noAutoFocus: true,
+  compact: true,
+  hideMenuItems: ['plugins', 'print'],
+}
+
+/** Minimal valid `.drawio` document, used until P2 wires real file reads. */
+export const EMPTY_DIAGRAM_XML = [
+  '<mxfile host="dsh-drawio" agent="dsh-drawio" type="device">',
+  '  <diagram id="dsh-drawio-blank" name="Page-1">',
+  '    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">',
+  '      <root>',
+  '        <mxCell id="0" />',
+  '        <mxCell id="1" parent="0" />',
+  '      </root>',
+  '    </mxGraphModel>',
+  '  </diagram>',
+  '</mxfile>',
+  '',
+].join('\n')
+
+export interface DrawioEmbedChannelOptions {
+  /** Resolved lazily so the channel can be built before the frame mounts. */
+  getFrame: () => HTMLIFrameElement | null
+  /** Called for every accepted `{ event }` message from the frame. */
+  onEvent: (event: string, payload: Record<string, unknown>) => void
+  /** Expected iframe origin; defaults to this window's origin. */
+  targetOrigin?: string
+}
+
+export interface DrawioEmbedChannel {
+  /** Send an `{ action }` message to the frame. `false` when it is not there yet. */
+  post: (action: string, payload?: Record<string, unknown>) => boolean
+  dispose: () => void
+}
+
+export function createDrawioEmbedChannel(options: DrawioEmbedChannelOptions): DrawioEmbedChannel {
+  const targetOrigin = options.targetOrigin ?? globalThis.location.origin
+
+  const handleMessage = (event: MessageEvent): void => {
+    const frame = options.getFrame()
+    // ① the sender must be our own frame…
+    if (frame === null || event.source !== frame.contentWindow) return
+    // ② …and it must be same-origin (a null origin, e.g. a sandboxed frame,
+    //    can never match).
+    if (event.origin !== targetOrigin) return
+    if (typeof event.data !== 'string') return
+
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(event.data)
+    } catch {
+      return
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return
+
+    const payload = parsed as Record<string, unknown>
+    const name = payload['event']
+    if (typeof name !== 'string' || name === '') return
+    options.onEvent(name, payload)
+  }
+
+  globalThis.addEventListener('message', handleMessage)
+
+  return {
+    post(action, payload) {
+      const frame = options.getFrame()
+      const target = frame?.contentWindow
+      if (target === null || target === undefined) return false
+      target.postMessage(JSON.stringify(payload === undefined ? { action } : { action, ...payload }), targetOrigin)
+      return true
+    },
+    dispose() {
+      globalThis.removeEventListener('message', handleMessage)
+    },
+  }
+}

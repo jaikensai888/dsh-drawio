@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { WebappInstaller } from './webapp-install.js';
 /**
  * The one and only `webServer.register` call this plugin ever makes.
  *
@@ -8,6 +9,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
  * sub-path. Do not add a second registration anywhere in this package.
  */
 export declare const DRAWIO_ROUTE_PREFIX = "/drawio";
-/** The `webServer.register({ kind: 'prefix', path: '/drawio' })` handler. */
-export declare function createDrawioRouteHandler(): (request: IncomingMessage, response: ServerResponse) => void;
+export interface DrawioRouteDeps {
+    installer: WebappInstaller;
+    /** Live non-loopback authorities this deployment serves (from `webRuntime`). */
+    trustedHosts: () => readonly string[];
+}
+/** Build the dispatch table for the single `/drawio` prefix route. */
+export declare function createDrawioRouteHandler(deps: DrawioRouteDeps): (request: IncomingMessage, response: ServerResponse) => void;
 //# sourceMappingURL=routes.d.ts.map

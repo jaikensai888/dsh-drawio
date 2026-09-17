@@ -51,6 +51,9 @@
     "react": ">=18.2.0",
     "react-dom": ">=18.2.0"
   },
+  "dependencies": {
+    "adm-zip": "0.6.0"
+  },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
     "@types/node": "^22.15.0",

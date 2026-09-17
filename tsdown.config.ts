@@ -64,6 +64,9 @@ export default [
     dts: false,
     sourcemap: true,
     clean: false,
+    // Runtime libraries stay real imports: bundling them would inline a zip
+    // reader into the plugin entry and hide the dependency from `files`.
+    external: ['adm-zip'],
   },
   clientBundle('client.js', PACKAGE_ID),
 ] satisfies UserConfig[]

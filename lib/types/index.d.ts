@@ -23,7 +23,11 @@ export type DrawioHostContext = Context & {
 /**
  * Host half: register exactly one prefix route and let `routes.ts` dispatch.
  *
- * There is intentionally no `Config` yet — P1/P3 add one together with the
+ * The self-hosted drawio webapp is fetched lazily — nothing touches the
+ * network until a viewer asks for it, and `/drawio/ping` stays a pure
+ * no-side-effect probe.
+ *
+ * There is intentionally no `Config` yet — P3 adds one together with the
  * `resolveDrawioConfig()` second-line-of-defence resolver (schemastery is
  * non-strict, so unknown yaml keys leak into the resolved config).
  */
