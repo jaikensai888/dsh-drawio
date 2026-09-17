@@ -611,7 +611,9 @@ function EditorPane(props: {
             flexWrap: 'wrap',
           }}
         >
-          <span style={{ flex: 1 }}>⚠ {conflict.message}本地改动尚未写入磁盘。</span>
+          {/* The host message already ends in a path, so it needs its own
+              separator — otherwise it reads as "demo.drawio本地改动…". */}
+          <span style={{ flex: 1 }}>⚠ {conflict.message}；本地改动尚未写入磁盘。</span>
           <button type="button" onClick={() => void reloadFromDisk()} style={BUTTON_STYLE}>
             放弃本地改动，读磁盘
           </button>
