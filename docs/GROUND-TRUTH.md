@@ -637,3 +637,92 @@ function diagramIsCompressed(diagramEl) {
 5. `dsh-base` 的 patch 是否真的挂了 `dsh-workspace`（未读）；所以要用 `ctx.get('workspaceRegistry')` 并降级。
 6. `@deepseek-ai/*` 发行包不含 `.d.ts`，但 `schemastery` / `cordis` / `cordis-plugin-loader` **带原始 `.ts` 源码**，需要类型时去读它们。
 7. `dsh.plugin.json` 在本机被 desktop host **读取为空**（死元数据）；不要依赖。但外部市场可能读它。
+
+---
+
+## 9. P0 期间新增核实（2026-09-17，全部 `[实测]`）
+
+> 这一节是实施 P0 时踩到、第 1~8 节没覆盖的事实。后续阶段（尤其"用 Chrome MCP 实测"）**必须先读**。
+
+### 9.1 🔴 用 Chrome MCP 驱动 GUI 需要先过浏览器鉴权
+
+第 1.2 节写的"探活返回 401 属正常"只是现象，**没有说怎么进去**。实际机制（源码在
+`dsh-client-connection/lib/index.js` 的 `BrowserAuth`）：
+
+- `GET /` 无凭据 → `401` + 正文 `dsh web authentication required; reopen the URL printed by dsh web.`
+- 两种有效凭据：
+  1. **launch token**：`GET /?token=<base64url>`（路径必须正好 `/`、`token` 参数**只能一个**）
+     → `303` 到 `/` 并 `Set-Cookie`。
+  2. **签名 cookie**：`dsh-auth-<base64url(sha256(authority))>` =
+     `v1.<base64url(JSON payload)>.<base64url(HMAC-SHA256(secret, body))>`，
+     payload = `{version:1, authority, issuedAt, expiresAt}`。
+     `authority` 就是 `Host` 头规范化后的值，例如 `127.0.0.1:43120`。
+- launch token 存在 `WeakMap` 里，`encodeBase64Url(randomBytes(32))`，**不落盘、不打日志** → 外部拿不到。
+- secret 是**持久化凭据**，在 `$DSH_HOME/.credentials.yaml` 的 `records` 里，
+  key 为 `client-connection` / `browser-session`，是 32 字节 base64url 字符串。
+  → **可以自己签一个 cookie**，然后在页面里 `document.cookie = '...; path=/'`。
+  （cookie 本身标了 `HttpOnly`，但服务端只读 `Cookie` 头，**不校验该标志**。）
+  可复用脚本：`.tmp/mint-cookie.mjs`（读 `.credentials.yaml` → 打印 cookie 串）。
+- **插件自己的路由默认不过鉴权闸**：`/drawio/ping` 无 cookie 也返回 200。
+  鉴权是**逐路由 opt-in** 的（`authorizeIndex` 只挂在 index 上），不要以为整个 host 都被拦。
+- `chrome_navigate` **不接受裸 IP**：传 `http://127.0.0.1:43120` 会被拼成
+  `Invalid url pattern 'http://www.127.0.0.1:43120/*'`。绕法：先开
+  `http://localhost:43120/`（能过），再用页面内 `location.href = 'http://127.0.0.1:43120/'` 跳过去。
+  ⚠️ `localhost` 本身拿不到东西（多半解析到 `::1`，而服务只 bind 127.0.0.1）→ 空白页，属正常。
+- 用户平时**不在浏览器里开 GUI**（Chrome 历史里除了我这次访问没有任何 43120 记录）；
+  GUI 是 DSH Desktop 自己的 Electron 窗口。Electron 侧 cookie 在
+  `%APPDATA%\DSH Desktop\Partitions\dsh-desktop-renderer\Network\Cookies`（Chromium 加密）。
+
+### 9.2 `dsh.client.inject` 里解析不到的 id 会被**静默跳过**
+
+`dsh-client-modules/lib/client.js:265`：
+
+```js
+for (const packageName of row.inject) {
+  const dependency = this.graphRows.get(packageName);
+  if (dependency !== void 0) await this.arriveGraphRow(dependency, [], visited);
+}
+```
+
+`@deepseek-ai/dsh-client-ui-slots` **不是** loader entry（本机组合树里 0 命中），
+但第 2.1 节和 dsh-skillui 都把它列在 inject 里且能正常工作——原因就是这条。
+→ 往 `dsh.client.inject` 加"未来会用到的包"没有副作用；但**列进去也不会让它存在**。
+真正会抛错的是 `require()`：`client-modules: require("<x>") missed the module table …`。
+
+### 9.3 `pnpm install` 会被沙箱的 `spawn EPERM` 打断在安装中途
+
+esbuild 的 postinstall 用 piped stdio 起子进程 → DSH 沙箱拒绝 `spawn` → **pnpm 崩在链接
+`node_modules/.bin` 之前**，症状是"包都装了（`.pnpm` 有 400+ 项）但 `.bin` 是空的"。
+对策（`pnpm-workspace.yaml`）：
+
+```yaml
+allowBuilds:
+  esbuild: false
+  node-pty: false
+```
+
+`@esbuild/win32-x64` 是正常装上的，vite/vitest 走 JS API，**不需要那个 postinstall**。
+`node-pty` 只是 `dsh-better-sidebar` 的传递依赖（我们只用它的 `.d.ts`），不建原生模块。
+
+### 9.4 `dsh <profile> --dump-config` 是重启前验证组合树的唯一手段
+
+- 它会**写** `profiles/<name>/cordis.yml`（空根配置，内容恒为 `[]`，每次 boot 重写）
+  和 `package.json` → 在工作区外 → 沙箱会 EPERM，需要放行。
+- 输出是**组合后的 loader 树**，可以据此确认 `- id: <entryId>` / `  name: <pkg>` 出现了、
+  以及有没有**重复 id**。P0 用它提前排掉了 `duplicate prefix route` 的一半风险。
+- 它**不 boot**，所以查不出运行期注册冲突；运行期要靠路由探针。
+
+### 9.5 `patchReload: "live"` **不能**免重启挂新 bundle
+
+`dsh/lib/profile-boot-*.js`：`patchReload === "live"` 只做两件事——
+按需挂 `cordis-plugin-timer` + `cordis-plugin-hmr`，然后 `watchUserPatches()` 监听
+**用户 patch 文件**（`profiles/<name>/cordis.patch.yml` 与 home patch）。
+`composeLive()` 里的 `composed.bundlePatches` 是 **boot 时快照**，**不会重读 `dsh.profile.bundles`**。
+→ 新装 bundle **必须重启**；且**不要**为了免重启往用户 patch 里再写一行挂载（会双挂载）。
+client 半同理：boot graph 是启动时扫的，客户端也别指望刷新就够。
+
+### 9.6 agent 的 shell 就住在 `DSH Desktop.exe` 里
+
+`pwsh` 的父进程链是 `powershell.exe → DSH Desktop.exe → …`。
+**重启 DSH Desktop 会杀掉当前 agent turn**（进程没了，turn 就没了），
+所以"重启"这一步只能交给用户做，agent 最多把重启前的验证做满再交接。
