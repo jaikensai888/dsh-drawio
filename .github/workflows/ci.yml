@@ -1,0 +1,44 @@
+name: CI
+
+# The one thing that must never drift: `lib/` is committed on purpose (a git-source
+# install has no build step, and `dsh.client` requires `lib/client.js` to exist before
+# the plugin activates). So CI rebuilds and fails if the committed artifacts no longer
+# match the sources they came from.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Committed lib/ must match the sources
+        run: |
+          if ! git diff --exit-code -- lib/; then
+            echo "::error::lib/ is out of date. Run 'pnpm build' and commit the result."
+            exit 1
+          fi
