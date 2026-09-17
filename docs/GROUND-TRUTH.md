@@ -862,3 +862,95 @@ Graph.decompress = function(data, inflate, checked) {
 - 编辑器标签页的关闭按钮是 `[class*="tabClose"]`，**不在** `[class*="paneTab"]` 内部，
   按 `x` 坐标顺序与标签栏一一对应，`y=17`。
 - 关掉标签页后再从文件树点开，是验证"保存→重开一致"的最短路径。
+
+---
+
+## 12. P3 期间新增核实（2026-09-17，全部 `[实测]`）
+
+### 12.1 `sidebar.footer.action` 是官方左栏唯一的加性席位
+
+声明在 `@deepseek-ai/dsh-client-ui-sidebar/lib/client.js`：
+
+```js
+"sidebar.footer.action": { kind: "list", scope: "root" }
+```
+
+- 同一张表里其它 4 个席位（`sidebar.brand.mark` / `brand.name` / `workspaces` / `settings`）
+  都是 `kind: "single"`，**单个占位者**，注册要抢；只有 `footer.action` 是 `list`，可加条目。
+- `list` 必须给 `options.id`（同 id 重复注册会抛）。
+- 渲染点是 `renderSlot("sidebar.footer.action", { wide })` —— 组件只拿到 owner prop `{ wide }`。
+  **parent 的 `inject` 是 `injectProps`**，所以业务面参数按 scope 决定。
+
+**注册配方**（照抄 `dsh-better-sidebar/src/client/intercept.tsx` 的写法）：
+
+```tsx
+export const inject = ['betterSidebar', 'slots'] as const   // 服务名，不是包名
+
+ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+  name: 'sidebar.footer.action',
+  id: 'your-plugin:thing',
+  order: 100,
+  registrant: 'your-plugin',
+}, () => <YourButton />)))
+```
+
+- **必须用 `slots.inject` 而不是直接 `register`**：slot 由 sidebar 声明，
+  注册早于声明会抛 `slot "x" is not declared`；`inject` 会等到声明提交再回调。
+- ⚠️ `register` 的 `inject` 选项是**业务面工厂**，和 `ctx.slots.inject(key, cb)` 是**两个东西**，别搞混。
+- **`scope: "root"` 意味着组件拿不到 session**。要"当前会话"就自己去
+  `ctx.betterSidebar.getSnapshot().sessionId`（dsh-skillui 也是这么做的），
+  并用 `subscribeState` 跟着切换走。
+
+### 12.2 🔴 `Config` 走的是 **Standard Schema**，而且未知键直通 `apply`
+
+`@deepseek-ai/cordis` 的 `src/fiber.ts`：
+
+```js
+export function resolveConfig(runtime, config) {
+  if (!runtime.Config) return config
+  const result = runtime.Config['~standard'].validate(config)
+  ...
+}
+```
+
+- schemastery 3.18 **实现了 Standard Schema**（`Config['~standard']` = `{vendor:'schemastery', version:1}`），
+  所以 `export const Config = z.object({...})` 能被 Loader 接受。
+- **未知键照样漏**：`Config['~standard'].validate({diagramsDir:'figs', bogus:1})` 返回的对象里
+  **`bogus: 1` 原样存在**。第 7 节踩坑 #9 因此又多了一层：未知键不只是进 `describe().user`，
+  是**直接进 `apply` 的第二个参数**。→ 必须自己写 `resolve*Config()` 二次兜底。
+- **schema 是严格的**：`validate({autosaveDelayMs:'nope'})` 返回 `issues`，
+  Loader 会判这一行插件校验失败 → **该 fiber 挂不起来**（现象是插件功能静默消失）。
+  类型写错的代价是"整行插件没了"，不是"退回默认值"。
+
+### 12.3 better-sidebar 交给 `load()` 的是**绝对路径**
+
+实测（在编辑器路径框里敲 `docs/diagrams/x.drawio` 回车后，viewer 里显示的 `path`）：
+
+```
+G:\claude_project\code-agent\dsh-drawio\docs\diagrams/from-path-input.drawio
+```
+
+—— cwd 与用户输入**直接字符串拼接**，于是出现**混合分隔符**（`\` 与 `/` 并存）。
+所以 host 侧的路径解析必须同时容忍绝对/相对与混合分隔符（`resolve()` + `isWithin()` 已经覆盖）。
+
+另外：**编辑器标签页自带一个路径输入框**（`[class*="editorPathInput"]`，
+placeholder `输入文件路径（相对会话目录或绝对路径），Enter 打开`）——
+PLAN §6(B) 说的"敲路径回车"入口就是它，不需要我们自己造。
+
+### 12.4 🔴 用 Chrome MCP 驱动这个 GUI 的两个实操陷阱
+
+1. **`chrome_computer type` 会把文字送进会话输入框，而不是你点的那个 input。**
+   实测：点中侧边栏路径输入框后 `type`，文本进了主会话的 composer（contenteditable），
+   **差一步就被当成给 agent 的消息发出去**。→ 要往 React 受控 input 里写值，
+   用原生 setter + 派发事件：
+   ```js
+   const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+   set.call(input, '新值')
+   input.dispatchEvent(new Event('input', { bubbles: true }))
+   input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true, cancelable: true }))
+   ```
+   用完记得确认 composer 是空的。
+2. **会话越长，GUI 越难驱动。** 到第 8 轮（532 步）时，a11y 树一次就有 476 个节点，
+   `chrome_javascript` 里稍微多遍历几个元素就会 16s 超时；左栏还会自己折叠。
+   → 用 `chrome_read_page` + ref 定位（它更快），把 JS 查询压到最小，
+   并且优先用"路径输入框 / 唯一按钮文案"这类**语义锚点**，别依赖坐标。
