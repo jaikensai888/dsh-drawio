@@ -18,7 +18,10 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 11
+          # Pinned rather than "11": the toolchain's supply-chain defaults have
+          # changed within the major, and CI should not change behaviour on its
+          # own. pnpm-workspace.yaml carries the policy settings.
+          version: 11.27.0
 
       - uses: actions/setup-node@v4
         with:

@@ -12,3 +12,14 @@ allowBuilds:
   # for its type declarations alone. Building the native module is unnecessary
   # here and would need a C++ toolchain.
   node-pty: false
+
+# pnpm's supply-chain "minimum release age" guard is DISABLED on purpose.
+#
+# The guard rejects a lockfile entry whose upstream publish time is inside the
+# age window, so CI depends on wall-clock time rather than on the code: a run
+# is red until however many hours have passed since a transitive dependency was
+# published (verified: @quansync/fs@1.1.0 failed every CI run for ~10h, then
+# would have gone green on its own and broken again on the next fresh bump).
+# The committed, reviewed pnpm-lock.yaml is this repo's trust anchor, so the
+# extra time-based gate buys nothing and costs a flaky pipeline.
+minimumReleaseAge: 0
