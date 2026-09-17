@@ -6,8 +6,9 @@
 - 编辑器：**自托管**的 drawio webapp，首次使用时自动下载到 `~/.dsh`，之后完全离线
 - 存储：图纸就是工作区里的文件（新建默认落 `<工作区>/docs/diagrams/`），可进 git
 
-> **状态：规划完成，尚未开始编码。** 实施计划见 [`docs/PLAN.md`](docs/PLAN.md)，
-> 所有已核实的环境与 API 事实（含踩坑清单）见 [`docs/GROUND-TRUTH.md`](docs/GROUND-TRUTH.md)。
+> **状态：P0（骨架）已落地，尚未接入 drawio 编辑器。** 当前 `.drawio` 预览器只渲染一个占位面板。
+> 实施计划见 [`docs/PLAN.md`](docs/PLAN.md)，所有已核实的环境与 API 事实（含踩坑清单）
+> 见 [`docs/GROUND-TRUTH.md`](docs/GROUND-TRUTH.md)。
 
 ---
 

@@ -1,0 +1,14 @@
+# pnpm 11 blocks dependency build scripts unless allowed here.
+#
+# esbuild is deliberately DENIED, not allowed: its postinstall spawns a child
+# process with piped stdio, which the DSH file sandbox rejects with
+# `spawn EPERM`, aborting the whole install before pnpm links node_modules/.bin.
+# The script is only a fallback for a missing platform package, and
+# @esbuild/win32-x64 is installed normally, so the JS API used by vite/vitest
+# works without it.
+allowBuilds:
+  esbuild: false
+  # node-pty only arrives transitively through dsh-better-sidebar, which we use
+  # for its type declarations alone. Building the native module is unnecessary
+  # here and would need a C++ toolchain.
+  node-pty: false

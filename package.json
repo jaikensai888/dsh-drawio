@@ -1,0 +1,71 @@
+{
+  "name": "dsh-drawio",
+  "version": "0.1.0",
+  "description": "DSH plugin: a draw.io diagram editor inside the dsh-better-sidebar file previewer, with diagrams stored as .drawio files in the current workspace.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "pnpm run declarations && tsdown",
+    "declarations": "tsc -p tsconfig.build.json",
+    "dev": "tsdown --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "dsh-better-sidebar"
+      ],
+      "external": [],
+      "immediately": false
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1",
+    "@deepseek-ai/dsh-host-webserver": ">=0.0.1-rc.1",
+    "dsh-better-sidebar": ">=0.16.1",
+    "react": ">=18.2.0",
+    "react-dom": ">=18.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@types/node": "^22.15.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "dsh-better-sidebar": "0.17.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tsdown": "^0.15.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jaikensai888/dsh-drawio.git"
+  }
+}
