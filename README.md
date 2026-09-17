@@ -17,7 +17,7 @@
 
 ```powershell
 cd $env:USERPROFILE\.dsh
-dsh plugin --profile desktop add "github:jaikensai888/dsh-drawio#v0.1.1"
+dsh plugin --profile desktop add "github:jaikensai888/dsh-drawio#v0.1.2"
 ```
 
 然后**完全退出并重启 DSH Desktop**(关窗口不算),再在浏览器里 `Ctrl+Shift+R`。
@@ -34,7 +34,9 @@ dsh plugin --profile desktop remove dsh-drawio
 
 ## 使用
 
-**打开图纸** —— 在侧边栏文件树里点任意 `.drawio`,它就在编辑器标签页里打开。
+**打开图纸** —— 在侧边栏文件树里点任意 `.drawio`,它就在编辑器标签页里打开:
+
+![在侧边栏里打开的 draw.io 画布](docs/images/editor-in-sidebar.png)
 
 **新建图纸** —— 三个入口任选:
 
@@ -44,7 +46,9 @@ dsh plugin --profile desktop remove dsh-drawio
 
 **保存** —— 自动的。工具栏右侧显示 `已同步 / 未保存 / 保存中… / 已保存 / 有冲突`。
 出现**冲突条**,说明文件被编辑器以外的东西改过;面板提供「放弃本地改动,读磁盘」和「用我的版本覆盖」,
-由你决定,插件不会替你选。
+由你决定,插件不会替你选:
+
+![冲突条](docs/images/conflict-bar.png)
 
 **面板太窄** —— draw.io 会自己收起形状/格式面板。把编辑器标签页**拖到主会话区域**,
 它会变成可移动、可缩放的悬浮窗口;拖回侧边栏即停靠。
