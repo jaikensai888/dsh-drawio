@@ -14,7 +14,8 @@ import type { Context } from '@deepseek-ai/cordis';
  */
 /** The slot this button occupies. */
 export declare const FOOTER_ACTION_SLOT = "sidebar.footer.action";
-export declare function NewDiagramButton({ ctx }: {
+export declare function NewDiagramButton({ ctx, wide }: {
     ctx: Context;
+    wide?: boolean;
 }): JSX.Element;
 //# sourceMappingURL=NewDiagramButton.d.ts.map

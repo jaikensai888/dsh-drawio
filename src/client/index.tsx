@@ -86,5 +86,5 @@ export function apply(ctx: Context): void {
     id: 'dsh-drawio:new-diagram',
     order: 100,
     registrant: 'dsh-drawio',
-  }, () => <NewDiagramButton ctx={ctx} />)))
+  }, (props: { wide?: boolean }) => <NewDiagramButton ctx={ctx} wide={props?.wide !== false} />)))
 }

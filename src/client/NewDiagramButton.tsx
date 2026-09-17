@@ -20,6 +20,21 @@ import { createDiagram } from './api.js'
 /** The slot this button occupies. */
 export const FOOTER_ACTION_SLOT = 'sidebar.footer.action'
 
+/**
+ * Sizing measured from the official left rail's own entries.
+ *
+ * The settings icon — the one this button sits next to — is **16x16 when the
+ * rail is expanded and 18x18 when it is collapsed** (same element, it swaps
+ * with the layout; the four top rail buttons are a constant 36x36/18x18). The
+ * slot owner hands us exactly that state as the `wide` prop, so the glyph
+ * tracks it instead of being permanently one size off.
+ *
+ * The hit area stays 36x36 either way: that is the rail's own button grid.
+ */
+const RAIL_BUTTON_PX = 36
+const RAIL_ICON_PX_WIDE = 16
+const RAIL_ICON_PX_NARROW = 18
+
 function activeScope(ctx: Context): SessionScope | undefined {
   try {
     const snapshot = ctx.betterSidebar.getSnapshot() as { sessionId?: unknown }
@@ -30,7 +45,11 @@ function activeScope(ctx: Context): SessionScope | undefined {
   }
 }
 
-function NewDiagramIcon({ size = 16 }: { size?: number }): JSX.Element {
+/**
+ * Icon-only glyph, drawn in the rail's own 16-unit viewBox and sized to match
+ * whatever the settings icon currently uses.
+ */
+function NewDiagramIcon({ size }: { size: number }): JSX.Element {
   return (
     <svg
       width={size}
@@ -39,15 +58,18 @@ function NewDiagramIcon({ size = 16 }: { size?: number }): JSX.Element {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
       aria-hidden="true"
+      // The slot's container is a flex row: without this the glyph gets
+      // squeezed horizontally (measured 7x16 before this was pinned).
+      style={{ flex: '0 0 auto', display: 'block' }}
     >
-      <rect x="1.75" y="1.75" width="6" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.4" />
-      <rect x="8.25" y="9.75" width="6" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M4.75 6.25v3.5a1 1 0 0 0 1 1h2.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <rect x="1.75" y="1.75" width="6" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.5" />
+      <rect x="8.25" y="9.75" width="6" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M4.75 6.25v3.5a1 1 0 0 0 1 1h2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   )
 }
 
-export function NewDiagramButton({ ctx }: { ctx: Context }): JSX.Element {
+export function NewDiagramButton({ ctx, wide = true }: { ctx: Context, wide?: boolean }): JSX.Element {
   const [scope, setScope] = useState<SessionScope | undefined>(() => activeScope(ctx))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -79,11 +101,13 @@ export function NewDiagramButton({ ctx }: { ctx: Context }): JSX.Element {
 
   const disabled = scope === undefined || busy
   const title = scope === undefined
-    ? '当前没有活跃会话，无法确定工作区'
+    ? '新建图纸：当前没有活跃会话，无法确定工作区'
     : error !== null
       ? `新建图纸失败：${error}`
-      : '在当前工作区的 docs/diagrams/ 下新建一张空白图纸'
+      : `新建图纸：在当前工作区新建一张空白图纸`
 
+  // The label lives in the tooltip / aria-label only: the rail is icon-only and
+  // the glyph must line up with its neighbours.
   return (
     <button
       type="button"
@@ -93,23 +117,26 @@ export function NewDiagramButton({ ctx }: { ctx: Context }): JSX.Element {
       disabled={disabled}
       title={title}
       aria-label="新建图纸"
+      aria-busy={busy}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 6,
-        padding: '4px 8px',
+        justifyContent: 'center',
+        flex: '0 0 auto',
+        width: RAIL_BUTTON_PX,
+        height: RAIL_BUTTON_PX,
+        padding: 0,
+        margin: 0,
         font: 'inherit',
-        fontSize: 12,
         cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
+        opacity: disabled ? 0.45 : 1,
         background: 'transparent',
-        border: '1px solid rgba(127,127,127,0.35)',
-        borderRadius: 4,
-        color: 'inherit',
+        border: 'none',
+        borderRadius: 6,
+        color: error !== null ? '#e5534b' : 'inherit',
       }}
     >
-      <NewDiagramIcon />
-      <span>{busy ? '新建中…' : '新建图纸'}</span>
+      <NewDiagramIcon size={wide ? RAIL_ICON_PX_WIDE : RAIL_ICON_PX_NARROW} />
     </button>
   )
 }
