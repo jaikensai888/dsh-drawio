@@ -105,6 +105,10 @@ dsh plugin --profile desktop add "link:G:\claude_project\code-agent\dsh-drawio"
 
 > schemastery 是**非严格**的，未知键会被 merge 进配置对象，所以这些值在插件里
 > 会由 `resolveDrawioConfig()` **重新推导一遍**再使用。
+>
+> ⚠️ 但 schema 本身是**严格**的：`autosaveDelayMs: "fast"` 这种类型错误会被 Loader
+> 直接判为校验失败，**这一行插件会挂不起来**（编辑器标签页随之消失）。改 yaml 时请按上表的类型写；
+> 写错了先看 `%APPDATA%\DSH Desktop\logs\dsh-*.log` 里的 validation 报错。
 
 ---
 
