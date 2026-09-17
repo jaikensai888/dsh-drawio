@@ -41,32 +41,25 @@ export const DRAWIO_EMBED_URL = `${DRAWIO_EMBED_PATH}?${DRAWIO_EMBED_QUERY}`
  * `lockdown: true` cuts every data channel except browser ↔ user-chosen
  * storage; the CSP we serve the webapp with (`connect-src 'self'`) is the
  * actual network-level gate behind it.
+ *
+ * `compressXml` mirrors how the file is stored, so drawio hands back a payload
+ * in that same style. That matters beyond convenience: each page is deflated
+ * independently, and letting drawio's own (pako) encoder do it keeps every
+ * *unmodified* page's bytes identical between saves, which is what stops a
+ * one-shape edit from rewriting every page in a compressed multi-page file.
  */
-export const DRAWIO_CONFIG: Readonly<Record<string, unknown>> = {
-  lockdown: true,
-  plugins: [],
-  compressXml: false,
-  autosaveDelay: 1500,
-  preserveViewState: true,
-  noAutoFocus: true,
-  compact: true,
-  hideMenuItems: ['plugins', 'print'],
+export function drawioConfig(options: { compressed: boolean }): Record<string, unknown> {
+  return {
+    lockdown: true,
+    plugins: [],
+    compressXml: options.compressed,
+    autosaveDelay: 1500,
+    preserveViewState: true,
+    noAutoFocus: true,
+    compact: true,
+    hideMenuItems: ['plugins', 'print'],
+  }
 }
-
-/** Minimal valid `.drawio` document, used until P2 wires real file reads. */
-export const EMPTY_DIAGRAM_XML = [
-  '<mxfile host="dsh-drawio" agent="dsh-drawio" type="device">',
-  '  <diagram id="dsh-drawio-blank" name="Page-1">',
-  '    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">',
-  '      <root>',
-  '        <mxCell id="0" />',
-  '        <mxCell id="1" parent="0" />',
-  '      </root>',
-  '    </mxGraphModel>',
-  '  </diagram>',
-  '</mxfile>',
-  '',
-].join('\n')
 
 export interface DrawioEmbedChannelOptions {
   /** Resolved lazily so the channel can be built before the frame mounts. */

@@ -1,4 +1,13 @@
 import type { FileViewerProps } from 'dsh-better-sidebar/client/service';
+import { type DiagramReadResult } from './api.js';
+/** What the descriptor's `load()` hands back through `customData`. */
+export type DiagramLoadPayload = {
+    kind: 'ready';
+    diagram: DiagramReadResult;
+} | {
+    kind: 'missing';
+    path: string;
+};
 /**
  * `.drawio` previewer backed by the self-hosted draw.io webapp.
  *
@@ -10,5 +19,5 @@ import type { FileViewerProps } from 'dsh-better-sidebar/client/service';
  * reason this viewer must never be hosted inside better-sidebar's browser/HTML
  * preview tabs, which are sandboxed frames.
  */
-export declare function DiagramViewer({ path, title }: FileViewerProps): JSX.Element;
+export declare function DiagramViewer(props: FileViewerProps): JSX.Element;
 //# sourceMappingURL=DiagramViewer.d.ts.map

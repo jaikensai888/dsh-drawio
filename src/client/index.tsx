@@ -1,7 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from 'dsh-better-sidebar'
-import type { FileViewerDescriptor, FileViewerProps } from 'dsh-better-sidebar/client/service'
-import { DiagramViewer } from './DiagramViewer.js'
+import type { FileViewerDescriptor, FileViewerProps, SessionScope } from 'dsh-better-sidebar/client/service'
+import { DrawioApiError, readDiagram } from './api.js'
+import { DiagramViewer, type DiagramLoadPayload } from './DiagramViewer.js'
 
 /**
  * Client-half plugin: register a `.drawio` file previewer on the
@@ -16,6 +17,29 @@ export const DIAGRAM_VIEWER_ID = 'dsh-drawio:diagram'
 
 const VIEWER_TITLE = '图表编辑器'
 
+/**
+ * Load a diagram through our own fenced host route.
+ *
+ * `fetchStrategy: 'custom'` means the sidebar calls this and renders the
+ * component with the resolved value as `customData`; a rejection becomes the
+ * sidebar's own error panel. A missing file is therefore NOT an error here —
+ * it is a state the viewer turns into a "create it?" affordance.
+ */
+export async function loadDiagram(
+  path: string,
+  scope: SessionScope,
+  signal?: AbortSignal,
+): Promise<DiagramLoadPayload> {
+  try {
+    return { kind: 'ready', diagram: await readDiagram(scope, path, signal) }
+  } catch (error) {
+    if (error instanceof DrawioApiError && error.status === 404) {
+      return { kind: 'missing', path }
+    }
+    throw error
+  }
+}
+
 /** The descriptor handed to `ctx.betterSidebar.registerFileViewer`. */
 export function createDiagramViewerDescriptor(): FileViewerDescriptor {
   return {
@@ -25,9 +49,11 @@ export function createDiagramViewerDescriptor(): FileViewerDescriptor {
     // catch-all `code` viewer (priority -100); priority 0 wins outright.
     exts: ['drawio', 'dio'],
     priority: 0,
-    // P2 switches this to 'custom' and loads the file through /drawio/api/read;
-    // the editor itself always talks to the host over the embed protocol.
-    fetchStrategy: 'none',
+    // Bytes come from /drawio/api/read, not better-sidebar's fs.read: that one
+    // truncates at 512KB, resolves relative paths against the git root and
+    // applies no isWithin fence.
+    fetchStrategy: 'custom',
+    load: (path: string, scope: SessionScope, signal?: AbortSignal) => loadDiagram(path, scope, signal),
     component: (props: FileViewerProps) => <DiagramViewer {...props} />,
   }
 }

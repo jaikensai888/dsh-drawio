@@ -13,6 +13,11 @@ export interface DrawioRouteDeps {
     installer: WebappInstaller;
     /** Live non-loopback authorities this deployment serves (from `webRuntime`). */
     trustedHosts: () => readonly string[];
+    /**
+     * Authoritative workspace cwd for a session. `header.cwd` wins; the client's
+     * cwd is only a hydration fallback, and `process.cwd()` the last resort.
+     */
+    resolveSessionCwd: (sessionId: string, clientCwd?: string) => string;
 }
 /** Build the dispatch table for the single `/drawio` prefix route. */
 export declare function createDrawioRouteHandler(deps: DrawioRouteDeps): (request: IncomingMessage, response: ServerResponse) => void;

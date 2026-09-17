@@ -26,10 +26,16 @@ export declare const DRAWIO_EMBED_URL: string;
  * `lockdown: true` cuts every data channel except browser ↔ user-chosen
  * storage; the CSP we serve the webapp with (`connect-src 'self'`) is the
  * actual network-level gate behind it.
+ *
+ * `compressXml` mirrors how the file is stored, so drawio hands back a payload
+ * in that same style. That matters beyond convenience: each page is deflated
+ * independently, and letting drawio's own (pako) encoder do it keeps every
+ * *unmodified* page's bytes identical between saves, which is what stops a
+ * one-shape edit from rewriting every page in a compressed multi-page file.
  */
-export declare const DRAWIO_CONFIG: Readonly<Record<string, unknown>>;
-/** Minimal valid `.drawio` document, used until P2 wires real file reads. */
-export declare const EMPTY_DIAGRAM_XML: string;
+export declare function drawioConfig(options: {
+    compressed: boolean;
+}): Record<string, unknown>;
 export interface DrawioEmbedChannelOptions {
     /** Resolved lazily so the channel can be built before the frame mounts. */
     getFrame: () => HTMLIFrameElement | null;

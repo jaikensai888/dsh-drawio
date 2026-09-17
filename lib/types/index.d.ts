@@ -16,10 +16,28 @@ type WebRoute = {
 type WebServer = {
     register(route: WebRoute): () => void;
 };
+type Sessions = {
+    get(sessionId: string): {
+        header: {
+            cwd?: string;
+        };
+    } | undefined;
+};
 /** Host context with the services declared in {@link inject}. */
 export type DrawioHostContext = Context & {
     webServer: WebServer;
+    sessions: Sessions;
 };
+/**
+ * Resolve the workspace directory a session's diagrams are scoped to.
+ *
+ * `header.cwd` is authoritative — the session store validated it as an
+ * absolute path at construction. The client's copy is a hydration fallback
+ * (useful before a session is materialised) and the process cwd the last
+ * resort. `ctx.sessions.list()` only returns live sessions, so nothing here
+ * tries to look up historical working directories.
+ */
+export declare function sessionCwdOf(ctx: Sessions, sessionId: string, clientCwd?: string): string;
 /**
  * Host half: register exactly one prefix route and let `routes.ts` dispatch.
  *
