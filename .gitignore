@@ -1,0 +1,30 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build scratch
+*.tsbuildinfo
+.vite/
+dist/
+
+# ★ lib/ 是构建产物，但【必须提交】：
+#   git 源安装（dsh plugin add github:...#tag）没有 build 步骤，
+#   而 dsh.client 要求激活前 lib/client.js 已存在，否则整棵插件树激活失败。
+#   因此这里刻意不忽略 lib/。
+# !lib/
+
+# logs / os
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
+
+# editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# local scratch
+.tmp/
+*.local

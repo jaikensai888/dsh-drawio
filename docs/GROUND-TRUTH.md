@@ -1,0 +1,639 @@
+# GROUND-TRUTH — 已核实的事实与踩坑清单
+
+> 本文是 `dsh-drawio` 的**施工前事实基线**。所有条目都在本机真实环境里读过源码/跑过命令核对，
+> 目的是让新会话**不必重新调研**，也**不要重新踩坑**。
+> 标注 `[实测]` 的是我实际执行验证过的；`[源码]` 的是从源码读出的；`[未验证]` 的必须自己再确认。
+
+环境时间基准：2026-09-17。DSH Desktop `2.0.4`，`@deepseek-ai/*` = `0.1.2-alpha.1`。
+
+---
+
+## 0. 一句话结论
+
+要加一个"侧边栏里的 draw.io 编辑器 + 工作区级图纸读写"，**唯一可行的路径**是：
+
+> 写一个第三方 DSH 插件（host 半 = HTTP 路由 + 文件读写，client 半 = 通过
+> `ctx.betterSidebar.registerFileViewer` 注册 `.drawio` 预览器），
+> 编辑器本体用**自托管**的 drawio webapp 塞进 iframe，数据走 postMessage。
+
+已有一个完整的同构蓝图可以直接抄：`G:\claude_project\code-agent\dsh-skillui`。
+
+---
+
+## 1. 环境事实
+
+### 1.1 目标 profile 是 `desktop`，不是 `web` `[实测]`
+
+`C:\Users\jaike\AppData\Roaming\DSH Desktop\host-commands\desktop\bin\dsh.cmd`：
+
+```bat
+set "ELECTRON_RUN_AS_NODE=1"
+set "DSH_DESKTOP_DEFAULT_PROFILE=desktop"
+set "DSH_HOME=C:\Users\jaike\.dsh"
+"E:\DSH\DSH Desktop\DSH Desktop.exe" --expose-internals "E:\DSH\DSH Desktop\resources\app.asar\lib\desktop-cli.js" %*
+```
+
+`C:\Users\jaike\.dsh\profiles\desktop\package.json`：
+
+```json
+{
+  "name": "dsh-profile-desktop",
+  "private": true,
+  "dsh": {
+    "profile": {
+      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app",
+                  "dsh-better-sidebar", "dsh-skillui", "@wenaixi/dsh-superpower"],
+      "patchReload": "live"
+    }
+  },
+  "dependencies": {
+    "@wenaixi/dsh-superpower": "6.3.1",
+    "dsh-better-sidebar": "0.17.1",
+    "dsh-skillui": "link:G:/claude_project/code-agent/dsh-skillui"
+  }
+}
+```
+
+> ⚠️ `profiles/web/` 也存在（只有 `dsh-better-sidebar@0.14.0`），但**运行中的 GUI 用的是 `desktop`**。
+> 所有安装/调试命令都要带 `--profile desktop`。
+
+### 1.2 关键路径
+
+| 用途 | 路径 |
+|---|---|
+| DSH home | `C:\Users\jaike\.dsh` |
+| 目标 profile | `C:\Users\jaike\.dsh\profiles\desktop` |
+| 已装插件 | `C:\Users\jaike\.dsh\profiles\desktop\node_modules\dsh-better-sidebar` (0.17.1) |
+| **蓝图插件（完整 host+client 源码）** | `G:\claude_project\code-agent\dsh-skillui` |
+| DSH 桌面壳 checkout | `E:\DSH\DSH Desktop\resources\app.asar.unpacked` |
+| `@deepseek-ai/*` 发行包 | `<checkout>\node_modules\@deepseek-ai\`（**不含 `.d.ts`**） |
+| 本插件开发目录 | `G:\claude_project\code-agent\dsh-drawio` |
+| 本地 `dsh` CLI | `C:\Users\jaike\AppData\Roaming\DSH Desktop\host-commands\desktop\bin\dsh.cmd` |
+| 运行中的 GUI | `http://127.0.0.1:43120`（浏览器直接访问；探活返回 401 属正常，那是信任围栏） |
+
+### 1.3 工具链 `[实测]`
+
+```
+node   v24.11.1
+npm    11.6.2
+pnpm   11.8.0
+git    2.37.0.windows.1
+gh     ✗ 未安装
+```
+
+git 身份：`wengjuntao <jaikensai888@qq.com>`；系统级 `credential.helper = manager-core`（Git Credential Manager），HTTPS push 走 GCM。
+
+### 1.4 沙箱 `[实测]`
+
+当前 DSH 会话文件策略是 `workspace-write`，工作区 = 会话 cwd。
+**往会话工作区之外写文件会被沙箱拒绝**（实测探针被拒）。
+新会话请把工作区设为 `G:\claude_project\code-agent\dsh-drawio`，否则无法落盘。
+
+---
+
+## 2. DSH 插件包契约
+
+### 2.1 `package.json` 的三个 `dsh` 字段 `[源码]`
+
+```jsonc
+{
+  "main": "lib/index.js",              // host 半入口
+  "exports": {
+    ".":        { "types": "./lib/types/index.d.ts",        "default": "./lib/index.js" },
+    "./client": { "types": "./lib/types/client/index.d.ts", "default": "./lib/client.js" }  // ★ 必需
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },   // 声明本包是 profile bundle 层
+    "client": {
+      "platform": "web",                            // ★ 必需，且只认 "web"
+      "inject": ["@deepseek-ai/dsh-client-ui-slots", "dsh-better-sidebar"],
+      "external": [],                               // 基座之外额外 require 的 specifier
+      "immediately": false                          // 是否启动时预取
+    }
+  }
+}
+```
+
+- `dsh.client.platform` 必须是字符串；**只有 `"web"` 会被扫描**，其他一律跳过。
+- 声明了 `dsh.client` 却**没有 `exports["./client"]`** → 组合期直接抛错。
+- `dsh.bundle.patch` 是"本包作为 profile 层被挂载"的声明。**没有它，`dsh plugin add` 只当普通依赖装，且会警告**；而且 `dsh-app-boot` 在解析 bundle 时发现缺它会直接抛错。
+- **`dsh.host` 不存在**——不要臆造。
+
+### 2.2 双半结构只共享包名 `[源码]`
+
+- **host 半**：由 profile 的 loader 树按包名挂载，走 `main` / `exports["."]`，Node 侧 ESM。
+- **client 半**：由 `@deepseek-ai/dsh-client-modules` 扫**已启用的 loader entry**，读 `dsh.client`，产出浏览器 bundle。
+- 两者唯一的连接点是**包名**。因此：**host 半必须存在，client 半才会被发现。**
+
+### 2.3 host 半的导出形状 `[源码]`
+
+```ts
+export const name = 'dsh-drawio'
+export const inject = ['webServer', 'sessions'] as const
+export const Config = z.object({ /* schemastery */ })
+export function apply(ctx: Context, config?: DrawioConfig): void { /* ... */ }
+```
+
+- **规范要求：无 default 导出**；具名 `name` / `inject` / `apply` / 可选 `Config`。
+- `inject` 是**硬依赖**，fiber 会等这些服务就绪。
+- 可选依赖用 `ctx.inject(['settings'], (sctx) => { ... })`，**不会阻塞挂载**。
+- 一切资源用 `ctx.effect(() => { ...; return dispose })` 包裹，fiber 释放时自动回收。
+- `Config` 经 schemastery 校验后作为**第二个参数**传给 `apply`。
+
+### 2.4 client 半的导出形状 `[源码]`
+
+```ts
+export const inject = ['betterSidebar'] as const
+export function apply(ctx: Context): void {
+  ctx.effect(() => ctx.betterSidebar.registerFileViewer({ /* ... */ }))
+}
+```
+
+`inject` 里放的是 **cordis 服务名**（`'betterSidebar'`、`'slots'`），不是包名。
+`dsh.client.inject` 里放的是**包名**（决定 bundle 到达顺序）。两者别混。
+
+---
+
+## 3. client bundle 的构建（最容易做错的一环）
+
+### 3.1 目标产物格式 `[源码]`
+
+`lib/client.js` **不是 ESM**，必须是 classic script：
+
+```js
+window.__ModuleLoader__.load({
+  id: "dsh-drawio",                       // 包名；尾缀 "/client" 会被剥掉
+  factory: (require) => {
+    var module = { exports: {} };
+    var exports = module.exports;
+    /* ...bundle 内容... */
+    exports.apply = apply;
+    exports.inject = inject;
+    return module.exports;
+  }
+});
+```
+
+- 执行 bundle **只注册 factory**；所有模块副作用（含 CSS 注入）必须在 factory 闭包内、物化时才跑。
+- `id` 必须是**包名**。
+
+### 3.2 现成配方：抄 `dsh-skillui/tsdown.config.ts` `[实测]`
+
+```ts
+import type { UserConfig } from 'tsdown'
+
+const PACKAGE_ID = 'dsh-drawio'
+const CLIENT_EXTERNALS = [
+  'react',
+  'react/jsx-runtime',
+  'react-dom',
+  'react-dom/client',
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-ui-slots',
+  '@deepseek-ai/dsh-client-ui-primitives',
+]
+
+function clientBundle(entryFile: string, moduleId: string): UserConfig {
+  return {
+    entry: { client: 'src/client/index.tsx' },
+    outDir: 'lib',
+    format: 'cjs',
+    platform: 'browser',
+    target: 'es2022',
+    dts: false,
+    sourcemap: true,
+    clean: false,                                   // ★ 见 3.5
+    external: CLIENT_EXTERNALS,
+    noExternal: (id) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
+    define: { 'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production') },
+    outputOptions: {
+      entryFileNames: entryFile,
+      banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(moduleId)}, factory: (require) => {`,
+      footer: 'return module.exports; } });',
+      intro: 'var module = { exports: {} }; var exports = module.exports;',
+    },
+  }
+}
+
+export default [
+  { entry: { index: 'src/index.ts' }, outDir: 'lib', format: 'esm', platform: 'node', target: 'es2022', dts: false, clean: false },
+  clientBundle('client.js', PACKAGE_ID),
+] satisfies UserConfig[]
+```
+
+> **`banner` + `intro` + `footer` 三件套就是全部魔法**，不要手写包装层。
+> 参考配置里 externalize 了 `cordis` 和 `@deepseek-ai/dsh-client-runtime/client`，
+> 但**这两个都解析不了**（见 3.3）——我们的 bundle 里只要不 `require` 它们就无害，但别照抄进新代码。
+
+### 3.3 平台模块表只有 8 个可 `require` 的 specifier `[源码]`
+
+```
+react
+react/jsx-runtime
+react-dom
+react-dom/client
+@deepseek-ai/cordis
+@deepseek-ai/dsh-client-store
+@deepseek-ai/dsh-client-ui-slots
+@deepseek-ai/dsh-client-ui-primitives
+```
+
+- **没有 import map**，是手写的 lazy-CJS 表。表外的 specifier 只有在"已注册的 graph row factory"里才解析得到 —— 而这正是 `dsh.client.inject` 保证的（让依赖方 bundle 先到达）。
+- 裸 `cordis` **不在表里**，且本机没装裸 `cordis` 包。要 cordis 就用 `@deepseek-ai/cordis`，**更好的做法是用服务注入**（`inject = ['betterSidebar']`），根本别 require。
+- **client 半拿不到任何 config**：boot manifest 每条只有 `{id, inject, immediately}`，boot kernel 以 `create({ name })` 建 entry，**从不写 config**。
+  → 用户设置只能走：(a) 自己的 host 路由；(b) better-sidebar 的 `pluginSettings` 缝。
+
+### 3.4 bundle 怎么被服务 `[源码]`
+
+- 走 `/plugins` 前缀路由，但**只认启动 combo URL**（`/plugins/??<id>/client.js,...&rev=<hash>`）。
+- **手写 `fetch('/plugins/dsh-drawio/client.js')` 会真 404。** 永远不要硬编码这个 URL。
+- 所有产物在 host 内存里留多份快照，并带 `cache-control: public, max-age=31536000, immutable`。
+  → **大资源（drawio 的 ~100MB）绝不能进 client bundle**，必须走自己的路由。
+
+### 3.5 Windows 文件锁陷阱 `[源码]`
+
+DSH Desktop 运行时持有 `lib/*.js`。**`rm -rf lib` 会 EPERM 失败。**
+→ 因此（且因为要提交构建产物）**build 脚本不要 clean**，靠 `tsdown` 原地覆盖。
+这样 client 改动还能被 `dsh-client-hmr`（轮询 `lib/client.js`）热替换，不必退出 DSH。
+
+---
+
+## 4. better-sidebar 的扩展契约（我们是它的 client）
+
+包：`dsh-better-sidebar@0.17.1`（`~/.dsh/profiles/desktop/node_modules/`）。
+它同时带 `src/`（原始 TS）与 `lib/types/**/*.d.ts`，**可以读到真实契约**。
+
+### 4.1 服务 `[源码]`
+
+```ts
+import type {} from 'dsh-better-sidebar'   // 触发 ctx.betterSidebar 类型合并
+export const inject = ['betterSidebar']
+```
+
+服务在 client 半由 `ctx.provide('betterSidebar', service)` 发布，通过**双模块增强**
+（`declare module 'cordis'` 与 `declare module '@deepseek-ai/cordis'`）暴露类型。
+
+### 4.2 文件预览器契约 `[源码]`
+
+```ts
+export type FileFetchStrategy = 'none' | 'fsRead' | 'mediaUrl' | 'custom' | 'binary-download'
+
+export interface FileViewerDescriptor {
+  id: string                    // 唯一；用 'dsh-drawio:editor' 这种带命名空间的
+  title?: string | (() => string)
+  icon?: ReactNode | ((size: number) => ReactNode)
+  exts: readonly string[]       // 小写、不带点；[] = catch-all
+  priority?: number             // 默认 0，大者先匹配
+  fetchStrategy: FileFetchStrategy
+  detect?: (path: string, head: Uint8Array) => boolean
+  load?: (path: string, scope: SessionScope, signal?: AbortSignal) => Promise<unknown>
+  settings?: SidebarSettingsDeclaration
+  component: (props: FileViewerProps) => ReactNode   // 必需
+}
+
+export interface FileViewerProps {
+  ctx: Context; store: SidebarStore; scope: SessionScope
+  path: string; title: string; viewerId: string
+  content?: string; truncated?: boolean          // fsRead
+  mediaUrl?: string                              // mediaUrl
+  customData?: unknown                           // custom ← 我们用这个
+  /* 其余为内置编辑器内部用，忽略即可 */
+}
+```
+
+**匹配算法**：按 `priority` 降序（同值按注册序稳定）逐个给机会；每个 descriptor 先试自己的 `detect`（有 head 字节时），再试 `exts`；`exts: []` 是 catch-all，但带 `detect` 的 catch-all 是 **sniff-only**（没 head 就跳过，不能盲吞）。已禁用的 viewer 直接跳过。
+
+**名字必须避开的内置 id**：viewer = `image` / `pdf` / `markdown` / `html` / `code` / `binary-download`；tab = `editor` / `git` / `subagent` / `terminal` / `browser` / `diff`。
+
+**`.drawio` 目前无人认领**，会掉到 `code`（catch-all, priority -100）。我们在默认 priority 0 注册 `exts: ['drawio','dio']` 即自动胜出。
+
+### 4.3 会话 scope 与 cwd `[源码]`
+
+```ts
+export interface SessionScope {
+  sessionId: string
+  cwd?: string          // 可选；权威值在 host 侧
+}
+```
+
+`TabComponentProps` / `FileViewerProps` 都带 `scope`。要显式解析用 `api.sessionCwd(scope)`。
+
+### 4.4 版本契约稳定性 `[实测]`
+
+我逐条比对了 **0.14.0 与 0.17.1** 的 `lib/types/client/service.d.ts`：
+`registerTab` / `registerFileViewer` / `FileViewerDescriptor` / `FileViewerProps` / `openFile`
+**完全一致，无 drift**。0.17 新增的 `features` 项：`'floatWindows'`。
+
+### 4.5 ★ `floatWindows`：解决"侧边栏太窄" `[源码]`
+
+v0.16.0+：把标签栏的**任意 tab（内置或插件注册的）拖到主会话区域** →
+变成可移动 / 可缩放 / 置顶的**悬浮窗口**（默认 390×780，钳制到视口），拖回侧边栏 pane 即停靠。
+`features` 含 `'floatWindows'`；`openTab` 的 dedupe/id 聚焦命中浮动 tab = **置顶**而非重复开。
+
+→ 我们**不需要自己写弹窗**。文档里告诉用户"把编辑器 tab 拖到主会话区域即可放大"。
+
+### 4.6 其它可用 API `[源码]`
+
+```ts
+registerFileViewer(descriptor): () => void   // 返回 disposer
+openFile(scope, path, title?): void          // 在侧边栏编辑器打开文件 ← 冷启动入口 A/B 要用
+matchFileViewer(path, head?): FileViewerDescriptor | undefined
+getSnapshot(): SidebarSnapshot               // { sessionId, state, prefs }
+subscribeState(listener): () => void
+readonly features: readonly string[]         // 能力探测（单调增，永不移除）
+settings?: { pluginToggles?, render? }       // 插件自有设置，持久化在 pluginSettings[<id>]
+```
+
+**重复注册同一个 id 会抛错**（`tab type "x" already registered`）。
+
+---
+
+## 5. host 侧 API
+
+### 5.1 webserver `[源码]`
+
+服务名 **`ctx.webServer`**（注意大小写），inject token 字符串 **`'webServer'`**。
+
+```ts
+ctx.webServer.register({ kind: 'exact' | 'prefix', path: string, handler })
+ctx.webServer.registerUpgrade({ path, handler })
+ctx.webServer.registerFallback(handler)
+ctx.webServer.tapIndex(transform)
+ctx.webServer.port / .host
+```
+
+- **同一张表内重复 `(kind, path)` 直接抛错**：`webserver: duplicate prefix route "/x"`。
+  这会让**整棵插件树启动失败**（`dsh web` 崩），是双挂载的经典症状。
+- 匹配顺序：**先精确，再最长前缀，最后 fallback**。
+- 前缀是**段边界感知**的：`/drawio` 匹配 `/drawio` 与 `/drawio/x`，**不匹配** `/drawio-other`。
+- **没有静态目录 API**、没有 JSON body 助手、没有 sendFile。给你的是裸 `node:http` 的 `req`/`res`，响应生命周期完全自负。
+- handler 抛错 → 400（若已发头则 destroy socket），记 warning，**绝不退出进程**。
+
+#### 已被占用的路由（避免撞车）`[源码]`
+
+| kind | path | 归属 |
+|---|---|---|
+| prefix | `/api` | `dsh-client-connection` RPC 网关 |
+| prefix | `/plugins` | `dsh-client-modules` |
+| exact | `/plugins/events` | `dsh-client-hmr` SSE |
+| prefix | `/sidebar/api` | better-sidebar JSON API |
+| prefix | `/sidebar/file` | better-sidebar 媒体路由 |
+| prefix | `/sidebar/html` | better-sidebar HTML 预览 |
+| prefix | `/sidebar/bundle` | better-sidebar 懒加载 chunk |
+| upgrade | `/sidebar/ws/terminal`、`/sidebar/ws/agent-terminals` | better-sidebar |
+| upgrade | `/api/remote.mux` | `dsh-api-gateway` |
+| **fallback** | — | `dsh-host-frontend-static`（**唯一席位，已被占**） |
+
+**`/drawio` 空闲**，可以用。
+
+### 5.2 会话 → cwd（工作区隔离的基石）`[源码]`
+
+```ts
+function sessionCwdOf(ctx: Context, sessionId: string, clientCwd?: string): string {
+  const session = ctx.sessions.get(sessionId)
+  const headerCwd = session?.header.cwd          // ① 权威
+  if (headerCwd !== undefined && headerCwd !== '') return headerCwd
+  if (clientCwd !== undefined && clientCwd !== '') {   // ② hydration 兜底
+    try { return requireAbsolute(clientCwd) } catch { throw new SidebarError('bad-request', ...) }
+  }
+  return process.cwd()                            // ③ 最后手段
+}
+```
+
+- 服务名 `ctx.sessions`；`header.cwd` 在构造时被校验**必须是绝对路径**并被 `deepFreeze`。
+- **子会话 fork 时继承父会话 cwd** → 按 cwd 做的图纸作用域自动覆盖 subagent。
+- `ctx.sessions.list()` **只返回活跃会话**，拿不到历史工作区列表。
+
+**DSH 里 "workspace" 的准确含义**：`dsh-workspace` 提供的是**持久化的命名目录注册表**，不是权限边界。
+服务名 `ctx.workspaceRegistry`，关键方法：
+
+```ts
+list(): Workspace[]                              // 持久顺序
+get(id): Workspace | undefined
+resolveByPath(path): Promise<Workspace | undefined>   // 按 realpath 规范化后精确相等匹配
+create(path, title?) / delete(id) / insertBefore(...)
+```
+
+- **成员资格是 cwd 与 workspace.path 的规范化精确相等**，子目录**不算**成员。
+- `Workspace.status()` 返回 `'ok' | 'missing-dir'`（目录可能已消失）。
+- **host 侧没有"当前/活跃 workspace"概念**——那是纯客户端 UI 选择。
+- `workspaceRegistry` 依赖 `storageDomain` + `sessionPersistence`，最小组合里可能**不存在** → 用 `ctx.get('workspaceRegistry')` 并降级到 cwd。
+
+**推荐的图纸作用域键**：`workspace?.path ?? realpath(cwd)`。
+
+### 5.3 围栏与路径安全 `[源码]`
+
+**两个不同的东西都叫 "fence"，别混：**
+
+1. **浏览器信任围栏**（DNS-rebinding / 跨站防御，**不是鉴权**）：
+   `dsh-client-connection` 不导出它，better-sidebar 只能抄进自己包里，**我们也要抄**。
+   ```ts
+   export function isTrustedApiRequest(req, trustedHosts: readonly string[]): boolean {
+     const host = header(req.headers, 'host'); if (!host) return false
+     const hostUrl = parseAuthority(host);    if (!hostUrl) return false
+     if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHosts)) return false
+     if (header(req.headers, 'sec-fetch-site') === 'cross-site') return false
+     const origin = header(req.headers, 'origin'); if (origin === undefined) return true
+     try { return new URL(origin).host === hostUrl.host } catch { return false }
+   }
+   ```
+   可信主机列表来自 `ctx.webRuntime.trustedHosts`（需 `inject: ['webRuntime']`，或直接读 live 值）。
+
+2. **文件系统包含检查**（自己写，没有任何框架保证）：
+   ```ts
+   export function isWithin(base: string, target: string, platform = process.platform): boolean {
+     const norm = (v: string) => v.replace(/[\\/]+/g, '/').replace(/\/$/, '')
+     const b = norm(base), t = norm(target)
+     if (platform === 'win32') {
+       const lb = b.toLowerCase(), lt = t.toLowerCase()
+       return lt === lb || lt.startsWith(`${lb}/`)
+     }
+     return t === b || t.startsWith(`${b}/`)
+   }
+   ```
+   - 大小写不敏感（Windows）、容忍混合分隔符。
+   - 所有调用方传入的路径先过 `requireAbsolute()`（`path.isAbsolute` + `resolve`，拒绝 `C:foo` 这种盘符相对形式）。
+
+> ⚠️ **better-sidebar 的 `/sidebar/api` JSON 方法并没有应用 `isWithin`**（只有 `/sidebar/file` 和 `/sidebar/html` 应用了）。`fs.read` 还有 512KB 截断、相对路径按 **git 仓库根**解析。
+> → **我们不要复用它的 `fs.read`，自己实现带围栏的读写。**
+
+### 5.4 原子写 `[源码]`
+
+`@deepseek-ai/dsh-atomic-write` 导出 `writeFileAtomic(filename, content, options)`：
+
+- `options.mode` **必填**（权限位，让权限决策在每个调用点可见）。
+- 同目录随机后缀临时文件 + `wx` 独占创建（拒绝跟随符号链接）+ `rename` 替换。
+- 失败自动清理临时文件并重抛。**不做 fsync**；**只支持字符串内容**。
+- 另有 `withFileLock(filename, operation, options?)`（`wx` 建 `<file>.lock`，指数退避 20→200ms，默认等 2000ms）。
+- 它是**普通库，不是插件**：`import` 用，不能在 yaml 里挂载。
+
+### 5.5 插件配置：两条通道，别混 `[源码]`
+
+| | 部署配置 | 用户设置 |
+|---|---|---|
+| 来源 | `cordis.patch.yml` 的插件行 `config:` | `~/.dsh/settings.yaml` |
+| 机制 | `export const Config`（schemastery），Loader 校验后作 `apply` 第二参 | `ctx.settings.register(ns, schema)` |
+| 生效 | 需改 yaml / 重启 | 实时热更新 |
+
+推荐用 `installSettingsSection(ctx, ns, Config, entryConfig, hooks)`：把 `Config` 同时当设置 schema，yaml 行作为 `base` 层。层序 = **schema 默认值 → composition base → 用户文档**。
+
+命名空间规则：`/^[a-z][a-z0-9-]*$/`（小写 kebab-case）。用 `'dsh-drawio'`。
+
+> ⚠️ **schemastery 在这里是非严格的**：`Schema.resolve(..., strict = false)` 会 `merge(result, data)`，
+> **未知键会被 merge 进 resolved config 并进入 `describe().user`**。
+> → 关键字段用 `.required()`，并像 better-sidebar 那样写一个 `resolveDrawioConfig()` 二次兜底。
+
+> ⚠️ **`ctx.settings.describe()` 没有命名空间白名单**（`exposedNamespaces` 这个机制在整棵树里**不存在**）；
+> owner scope 的 `update`/`replace` **不带 revision 守卫**（只有 service 级 `ctx.settings.update(ns, patch, revision)` 带）。
+> → 命名空间内容是浏览器可读的，**不要放任何机密**。
+
+### 5.6 其它可选服务
+
+- `ctx.connection.handle('/channel', handler)`：注册一个 prefix RPC 路由，**自带连接层信任围栏与浏览器鉴权**。channel 必须是**单个路径段**（`/^\/[A-Za-z0-9._~-]+$/`，且不能是 `/api`）→ `/drawio` 合法，`/drawio/api` **不合法**。
+- `ctx.connection.fetch.register({ path, methods, fetch })`：注册一个**精确路径**的 Fetch 路由，handler 返回 `Response`（可用 `ReadableStream`）。匹配在 `/api` 拦截器之前。先例：`dsh-session-log-export` 的 `/api/session.export`。
+- `ctx.fs`（服务名 `'fs'`）：**不是必须的**；better-sidebar 直接用 `node:fs/promises`。`fs-local` 的 `cwd` 只是解析默认值，**不是包含边界**；真正的包含要靠 `dsh-fs-sandbox` + `ctx.sandboxPolicy`，而那是部署级、不是每工作区级。
+
+---
+
+## 6. drawio 集成要点
+
+### 6.1 自托管形态 `[源码/网络核实]`
+
+- 官方仓库 [jgraph/drawio](https://github.com/jgraph/drawio)，**Apache-2.0**。
+- 发布物 `draw.war`（GitHub Releases，例如 `v31.4.6` 的 **51.3 MB**）。`.war` 就是 zip。
+- **静态服务即可，不需要任何服务端端点**：embed 模式的数据**全部在客户端之间传递**，从不经过 drawio 服务器。`EXPORT_URL = null` 时 PDF 导出走浏览器打印对话框。
+- **npm 上没有可打包的 drawio 编辑器**（`@drawio/editor`、`@drawio/drawio`、`@drawio/embed`、`drawio-editor`、`@jgraph/drawio` 全部 404）。唯一的 `@drawio/*` 是 `@drawio/mcp`（MCP server，不是组件）。→ **只能 iframe，没有第二条路。**
+- 需要服务的最小集合 ≈ webapp 静态资源全体（`index.html`、`js/`、`styles/`、`images/`、`img/`、`resources/`、`math4/`、`mxgraph/`、`plugins/`、`templates/`）。**可以丢掉** `WEB-INF/`（Java classes + `lib/*.jar`）与 `META-INF/`。没有官方"最小构建"文档。
+- **商标**：draw.io 是欧盟注册商标（#018062448），官方要求使用其名称/logo 需事先书面许可。→ UI 用中性名「图表编辑器」，不放 logo，README 里做事实性署名。
+
+### 6.2 embed 协议 `[源码/网络核实]`
+
+iframe URL：
+
+```
+/drawio/webapp/index.html?embed=1&proto=json&spin=1&ui=min&libraries=1&configure=1&plugins=0&stealth=1&suppressNewWindows=1&lang=zh
+```
+
+**host → iframe（action）**：`load`（带 `xml`、`autosave:1`、`title`、`modified`）、`configure`（`{config:{...}}`）、`merge`、`patch`、`getDiff`、`resetDiff`、`dialog`、`prompt`、`template`、`layout`、`draft`、`status`、`spinner`、`export`、`fit`、`viewbox`、`resetEditor`、`invokeAction`、`textContent`、`viewport`、`snapshot`。
+
+**iframe → host（event）**：`init`、`configure`（需 `configure=1`）、`load`、**`autosave`（带 `xml`）**、**`save`（带 `xml`，点"Save and Exit"时附 `exit:true`）**、**`exit`（带 `modified`）**、`openLink`、`resize`、`export`、`shortcut`、`template`、`draft`、`prompt`、`prompt-cancel`、`merge`。
+
+> 🔴 **没有 `{action:'save'}` 这个 host 动作。** Save 只是 iframe→host 的事件，**host 无法命令 iframe 保存**。
+> → 必须靠 `{event:'save', xml}` 拿权威内容；autosave 只用于防抖落盘。UI 上要么保留 drawio 自己的 Save 按钮，要么只靠 autosave + 自己的"保存"按钮写**最后一次收到的 XML**。
+
+**autosave**：靠 `load` 消息里的 `autosave: 1` 开启（**不是 URL 参数**）。
+默认延迟 **2000ms**（`DrawioFile.prototype.autosaveDelay`，可在 configure 里用 `autosaveDelay` 覆盖），是**最后一次改动后的防抖**，不是固定轮询。
+注意 autosave 也会因**纯视图变化**（网格、参考线、页面视图、背景）触发 → 建议开 `preserveViewState: true`。
+
+**configure 回复**（`configure=1` 时 iframe 会等这个再 init）：
+
+```json
+{ "action": "configure", "config": {
+  "lockdown": true, "plugins": [], "compressXml": false,
+  "autosaveDelay": 1500, "preserveViewState": true,
+  "noAutoFocus": true, "compact": true,
+  "hideMenuItems": ["plugins", "print"]
+} }
+```
+
+`lockdown: true` = 切断除"浏览器 ↔ 用户选定存储位置"之外的一切数据传输。
+**真正可靠的总闸是 CSP 的 `connect-src 'self'`。**
+
+**origin 校验**：host→iframe 用显式 targetOrigin；iframe→host 官方示例只查 `evt.source === frame.contentWindow`。
+→ 我们**两者都查**：`evt.source === iframe.contentWindow && evt.origin === window.location.origin`，并 `try/catch` 包住 `JSON.parse`。
+
+### 6.3 `.drawio` 文件格式 `[源码/网络核实]`
+
+```xml
+<mxfile host=".." modified=".." agent=".." version=".." compressed="false">
+  <diagram id=".." name="Page-1">
+    <mxGraphModel dx=".." grid="1" ...><root>
+      <mxCell id="0"/><mxCell id="1" parent="0"/>
+    </root></mxGraphModel>
+  </diagram>
+</mxfile>
+```
+
+**压缩变体**（`@compressed="true"` 或 `<diagram>` 无元素子节点但有文本内容）：
+
+- 编码链：`XML → URL-encode → raw deflate → Base64`
+- 解码链：`base64 → zlib raw inflate（windowBits = -15）→ decodeURIComponent`
+
+**判定要用两个独立信号**（结构优先）：
+
+```js
+function diagramIsCompressed(diagramEl) {
+  if (diagramEl.getAttribute('compressed') === 'true') return true
+  return !Array.from(diagramEl.children).some(c => c.tagName === 'mxGraphModel')
+         && diagramEl.textContent.trim().length > 0
+}
+```
+
+**写回时保持原样式**：读进来是压缩的就写压缩的，否则 git diff 会全是噪音。
+`compressXml` 只控制**编辑器输出**，落盘形态由我们决定。
+
+> ⚠️ 网上流传的 `<!--[if IE]><meta ...` 是压缩标记的说法**没有证据**，别用。
+
+### 6.4 沙箱限制（实测结论，影响架构）🔴
+
+**draw.io 在 sandbox iframe 里起不来** `[实测]`：
+
+| iframe 配置 | 收到 `{event:'init'}`？ |
+|---|---|
+| 无 sandbox | ✅ |
+| `sandbox="allow-scripts"` | ❌ |
+| `sandbox="allow-scripts allow-popups allow-downloads allow-forms allow-modals"` | ❌ |
+| `sandbox="allow-scripts allow-same-origin"` | ✅ |
+| 嵌套：外层 `allow-scripts` → 内层 `allow-same-origin` | ❌ |
+
+原因（强推断）：opaque origin 下 `localStorage` 抛 `SecurityError`，编辑器内部初始化失败后**静默死掉**，不报错给父窗口。
+**且 sandbox 标志会被嵌套 iframe 继承，内层无法自行恢复。**
+
+→ 对本项目的含义：
+- better-sidebar 的**文件预览器是主文档里的普通 React 组件**（portal 渲染），**不是** sandbox iframe。
+- 所以我们自己创建的 drawio iframe **不在任何 sandbox 子树里** → 不受影响。
+- 但**绝不能**把 drawio iframe 放进 better-sidebar 的**浏览器 tab** 或 **HTML 预览器**（那两者是 sandbox iframe）。
+
+### 6.5 CSP / framing `[源码/网络核实]`
+
+- `embed.diagrams.net` 本身可被 iframe（实测能拿到 init）。
+- **自托管 webapp 的 `web.xml` 不设 `X-Frame-Options`**，Docker 版注入的 CSP 也没有 `frame-ancestors` → 可被 iframe。
+- 但**我们自己的静态路由必须显式发 CSP**（见 PLAN 第三节）。注意 drawio 可能需要 `'unsafe-inline'`（style 与部分 script），**可能需要 `'unsafe-eval'`——必须在 P1 实测**。
+
+---
+
+## 7. 踩坑清单（Checklist：每条都对应一次真实故障）
+
+| # | 坑 | 后果 | 对策 |
+|---|---|---|---|
+| 1 | 路径穿越检查用 `/` 而不是 `path.sep` | **每个合法子路径都被当穿越拒绝**（Windows 上 `resolve()` 出反斜杠） | 必须用 `sep`；列为单测项 |
+| 2 | 硬编码 `/plugins/<id>/client.js` | **真 404**（只服务 combo URL） | 永远从 boot graph 取 URL |
+| 3 | 把 drawio webapp 塞进 client bundle | host 内存里留多份 ~100MB 快照；`immutable` 缓存导致永远更新不了 | 走自己的 prefix 路由流式发 |
+| 4 | build 脚本 `rm -rf lib` | Windows 上 **EPERM**（DSH 持有文件） | build 不 clean |
+| 5 | 重复挂载 / 重复 `(kind,path)` 路由 | `duplicate prefix route` → **整棵插件树启动失败** | 一个 prefix 一个注册点；必要时抄 better-sidebar 的 `!!js` 退让守卫 |
+| 6 | 以为 client 半能拿到 config | `apply(ctx)` 第二参恒为 `undefined` | 设置走自己的 host 路由或 `pluginSettings` 缝 |
+| 7 | 以为 `ctx.settings` 会过滤命名空间 | 无白名单，**浏览器可读** | 不放机密 |
+| 8 | 用 owner scope 的 `update()` 做并发保护 | **不带 revision 守卫，静默丢失保护** | 用 service 级 `ctx.settings.update(ns, patch, revision)` |
+| 9 | 以为 schemastery 会拒绝未知键 | 未知键 **merge 进 resolved config** 并进浏览器 | `.required()` + 自己写 `resolve*Config()` |
+| 10 | 以为有 `{action:'save'}` | host **无法**命令 iframe 保存 | 靠 `save`/`autosave` 事件 |
+| 11 | 给 drawio iframe 加 sandbox 但漏 `allow-same-origin` | **编辑器静默不启动** | 不加 sandbox，或必须含 `allow-same-origin` |
+| 12 | 复用 better-sidebar 的 `fs.read` | 512KB 截断 + 相对路径按 git 根 + **无 `isWithin` 围栏** | 自己实现带围栏的读写 |
+| 13 | 只依赖 `ctx.sessions` 找历史工作区 | `list()` **只返回活跃会话** | 用 `workspaceRegistry`，且允许它不存在 |
+| 14 | 用官方左栏加 tab | **没有 tab 插槽**（52 个 slot 里没有） | 只能走 better-sidebar 服务 |
+| 15 | MIME 表照抄 `dsh-host-frontend-static` | 只有 8 个扩展名，**缺 `.png/.woff2/.wasm/.ttf/.cur`** | 自己写全 |
+| 16 | 假设 gzip 关着 | 实际 **开着**（level 1，阈值 1024）；Range 响应会被自动排除 | 别对 `.wasm`/`.woff2` 的 CPU 掉以轻心 |
+| 17 | 不提交 `lib/` 就想用 git 源安装 | `dsh.client` 要求启动前 `lib/client.js` 存在，否则激活失败 | 提交构建产物 + CI 校验同步 |
+| 18 | 用 `--profile web` 装 | 装到了**没有在跑**的 profile | 一律 `--profile desktop` |
+| 19 | read-only 沙箱里往会话工作区外写 | 拒绝访问 | 新会话工作区设成 `dsh-drawio` |
+
+---
+
+## 8. 未验证 / 需自行确认
+
+1. 本机 `%TEMP%` 是否可写（沙箱提到"部分平台临时区域可能可写"，未实测）。
+2. drawio webapp 是否真的需要 `'unsafe-eval'`（CSP 实测，P1 做）。
+3. `draw.war` 里 webapp 的确切布局（根目录 vs `webapp/` 子目录）——解压逻辑要**两种都兼容**。
+4. 解压后静态资源的**精确大小**（war 51.3MB 是实测；解压后只有"几十~150MB"的估算）。
+5. `dsh-base` 的 patch 是否真的挂了 `dsh-workspace`（未读）；所以要用 `ctx.get('workspaceRegistry')` 并降级。
+6. `@deepseek-ai/*` 发行包不含 `.d.ts`，但 `schemastery` / `cordis` / `cordis-plugin-loader` **带原始 `.ts` 源码**，需要类型时去读它们。
+7. `dsh.plugin.json` 在本机被 desktop host **读取为空**（死元数据）；不要依赖。但外部市场可能读它。
