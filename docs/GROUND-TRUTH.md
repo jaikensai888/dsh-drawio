@@ -726,3 +726,67 @@ client 半同理：boot graph 是启动时扫的，客户端也别指望刷新�
 `pwsh` 的父进程链是 `powershell.exe → DSH Desktop.exe → …`。
 **重启 DSH Desktop 会杀掉当前 agent turn**（进程没了，turn 就没了），
 所以"重启"这一步只能交给用户做，agent 最多把重启前的验证做满再交接。
+
+### 9.7 `pnpm install` 的两个环境坑
+
+- 加依赖时 `pnpm install` 会因为要重建 `node_modules` 而报
+  `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`（无 TTY 不敢删）。设 `CI=true` 可过。
+- 但 `CI=true` 又会把 `frozen-lockfile` 打开 → 报 `ERR_PNPM_OUTDATED_LOCKFILE`。
+  **加依赖时必须 `pnpm install --no-frozen-lockfile`。**
+
+---
+
+## 10. P1 期间新增核实（2026-09-17，全部 `[实测]`）
+
+### 10.1 drawio 资源包的确切事实
+
+| 项 | 值 |
+|---|---|
+| release tag | `v31.4.6`（`/releases/latest` 302 到这里；api.github.com 在本机被限流 403，改用 `curl -I` 看 302 更省事） |
+| URL | `https://github.com/jgraph/drawio/releases/download/v31.4.6/draw.war` |
+| war 大小 | `53,762,297` 字节 |
+| **war sha256** | `f7798104da17d7e9494ab348c3ba9b2a65640096bd54f704d7a0fa2fab283938` |
+| zip 条目数 | 3650（含目录条目） |
+| 解压总量 | 149,295,257 字节 ≈ 142.4 MB |
+| 落盘文件数 | **3382**（剔除 `WEB-INF/` 70 项 + `META-INF/` 2 项 + 目录条目） |
+| **布局** | **webapp 直接在 zip 根**（`rootPrefix: ""`），`index.html` 就在根上；`webapp/` 子目录那套**本版本不存在**，但解压器仍兼容 |
+| `index.html` | 2759 字节，只引 `styles/grapheditor.css` + `js/bootstrap.js` + `js/main.js`；**没有 service worker 注册** |
+| 扩展名分布 | svg 1772 / png 644 / js 446 / xml 366 / woff2 33 / gif 25 …… **没有 `.wasm`**（GROUND-TRUTH §8.2/§8.3/§8.4 结案） |
+
+### 10.2 drawio 在 embed 模式下的 UI 参数
+
+- **`ui=kennedy` 给出完整编辑器**：工具栏（实测 23 个按钮）、格式面板、形状面板、
+  菜单栏全在，`body.className === "geEditor geClassic geEmbed geCompactMode"`。
+- **`ui=min` 会砍掉形色面板**，不适合"能拖形状、能改属性"的目标。我们最终用 `ui=kennedy`。
+- ⚠️ **窄面板下 drawio 会自己折叠两侧面板**：在 ~537px 宽的侧边栏里，
+  `.geFormatContainer` 与 `.geSidebarContainer` 宽度被压到 1px，只剩画布 + 工具栏。
+  **这不是 bug**，正是 PLAN §3 让用户"把 tab 拖到主会话区变悬浮窗口（`floatWindows`）"的原因。
+  P3 文档要把这句写清楚。
+- `App.main()` 在 embed 模式**返回 undefined**；真正拿编辑器实例的把手是
+  **`iframe.contentWindow.sb.editorUi`**（`marker → .editor.graph` 就是 mxGraph）。
+  自动化验证直接用它：`ui.getFileData(true)` 读回 XML、`graph.insertVertex(...)` 改模型。
+  → 这条对 P2/P3 的实测极其有用，别再花时间找 App 实例。
+
+### 10.3 CSP 实测结论（GROUND-TRUTH §8.2 结案）
+
+- **不需要 `'unsafe-eval'`**：用
+  `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; … frame-src 'self'`
+  加载 drawio v31.4.6，**0 个 CSP 违规、0 个异常**，画布与工具栏正常。
+- **`frame-src 'self'` 够用**（PLAN 写的是 `'none'`）：外部 frame 照样全挡，但不误伤 drawio 自己的同源子 frame。
+- **`Origin: null` 必须拒绝**：sandbox 化的 frame 发出来的是字面量 `null`，
+  我们的围栏按 opaque origin 拒绝（也再次印证 GROUND-TRUTH 6.4：drawio 不能放进 sandbox）。
+- **DSH GUI 自身完全没有 CSP**：整个 `@deepseek-ai/*` 里 grep 不到 `content-security-policy`，
+  `dsh-web-frontend/dist/index.html` 也没有 CSP meta → 父页面不会挡住我们 frame 编辑器。
+
+### 10.4 离线与保存通道（实测）
+
+- 完整启动 drawio 共 **25 个资源**，**全部**来自本机同一个 host，**外部请求 0**。
+- `load` 消息带 `autosave: 1` 后，**模型一改就会收到 `{event:'autosave', xml}`**（约 1.5s 防抖）
+  → P2 的落盘触发点已经确认可用，不需要轮询。
+- 发给 drawio 的 `load.xml` 会被完整吃下：`ui.getFileData(true)` 能原样读回 `<mxfile><diagram id="…">`。
+
+### 10.5 浏览器 cookie 跨重启有效
+
+9.1 里手工签的 `dsh-auth-*` cookie **在 DSH Desktop 重启后仍然可用**——
+secret 持久化在 `~/.dsh/.credentials.yaml`，重启只换 launch token，不换 secret。
+24 小时内可以一直用同一个 cookie 驱动 GUI。
