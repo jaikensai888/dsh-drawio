@@ -17,7 +17,7 @@
 
 ```powershell
 cd $env:USERPROFILE\.dsh
-dsh plugin --profile desktop add "github:jaikensai888/dsh-drawio#v0.1.2"
+dsh plugin --profile desktop add "github:jaikensai888/dsh-drawio#v0.1.3"
 ```
 
 然后**完全退出并重启 DSH Desktop**(关窗口不算),再在浏览器里 `Ctrl+Shift+R`。
